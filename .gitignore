@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+.env
+.env.*
+
+# Node
+node_modules/
+.npm/
+
+# Data & models
+/data/
+/models/
+/embeddings/
+/knowledge_graph/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Build
+.dist/
+build/
+dist/
+
+# Poetry
+poetry.lock
+

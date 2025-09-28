@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FailSafe Fact Checker</title>
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+    <div class="popup-container">
+        <!-- Header -->
+        <div class="header">
+            <div class="logo">
+                <img src="icons/icon32.png" alt="FailSafe" class="logo-icon">
+                <h1>FailSafe</h1>
+            </div>
+            <div class="status-indicator" id="statusIndicator">
+                <span class="status-dot"></span>
+                <span class="status-text">Ready</span>
+            </div>
+        </div>
+
+        <!-- Main Content -->
+        <div class="content">
+            <!-- Quick Analysis -->
+            <div class="section">
+                <h3>Quick Analysis</h3>
+                <div class="input-group">
+                    <textarea 
+                        id="quickText" 
+                        placeholder="Paste text to analyze..."
+                        rows="3"
+                    ></textarea>
+                    <button id="analyzeBtn" class="btn btn-primary">
+                        <span class="btn-icon">🔍</span>
+                        Analyze
+                    </button>
+                </div>
+            </div>
+
+            <!-- Current Page Analysis -->
+            <div class="section">
+                <h3>Current Page</h3>
+                <div class="page-info">
+                    <div class="page-url" id="pageUrl">Loading...</div>
+                    <div class="page-title" id="pageTitle">Loading...</div>
+                </div>
+                <div class="page-actions">
+                    <button id="analyzePageBtn" class="btn btn-secondary">
+                        <span class="btn-icon">📄</span>
+                        Analyze Page
+                    </button>
+                    <button id="highlightBtn" class="btn btn-outline">
+                        <span class="btn-icon">🎯</span>
+                        Highlight Claims
+                    </button>
+                </div>
+            </div>
+
+            <!-- Analysis Results -->
+            <div class="section" id="resultsSection" style="display: none;">
+                <h3>Analysis Results</h3>
+                <div class="results-container" id="resultsContainer">
+                    <!-- Results will be populated here -->
+                </div>
+            </div>
+
+            <!-- Settings -->
+            <div class="section">
+                <h3>Settings</h3>
+                <div class="settings-group">
+                    <label class="setting-item">
+                        <input type="checkbox" id="autoHighlight" checked>
+                        <span class="setting-label">Auto-highlight claims</span>
+                    </label>
+                    <label class="setting-item">
+                        <input type="checkbox" id="showConfidence" checked>
+                        <span class="setting-label">Show confidence scores</span>
+                    </label>
+                    <label class="setting-item">
+                        <input type="checkbox" id="enableNotifications" checked>
+                        <span class="setting-label">Enable notifications</span>
+                    </label>
+                </div>
+                <button id="openOptions" class="btn btn-outline">
+                    <span class="btn-icon">⚙️</span>
+                    Advanced Settings
+                </button>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+            <div class="footer-links">
+                <a href="#" id="openWebApp">Open Web App</a>
+                <a href="#" id="openHelp">Help</a>
+            </div>
+            <div class="version">v1.0.0</div>
+        </div>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div class="loading-overlay" id="loadingOverlay" style="display: none;">
+        <div class="loading-spinner"></div>
+        <div class="loading-text">Analyzing...</div>
+    </div>
+
+    <script src="popup.js"></script>
+</body>
+</html>
+
+
+
+
+
+
