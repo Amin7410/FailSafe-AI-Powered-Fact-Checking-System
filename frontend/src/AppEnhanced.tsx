@@ -75,6 +75,11 @@ const AppEnhanced: React.FC = () => {
   const [report, setReport] = useState<ReportResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [analysisTime, setAnalysisTime] = useState<number | null>(null);
+  const [userRating, setUserRating] = useState<number>(0);
+  const [userComment, setUserComment] = useState<string>("");
+  const [feedbackStatus, setFeedbackStatus] = useState<string | null>(null);
+  const [overrideStatus, setOverrideStatus] = useState<string | null>(null);
+  const [overrideValue, setOverrideValue] = useState<string>("");
 
   const analyzeClaim = async () => {
     if (!inputText.trim() && !inputUrl.trim()) {
@@ -133,6 +138,85 @@ const AppEnhanced: React.FC = () => {
     setReport(null);
     setError(null);
     setAnalysisTime(null);
+    setUserRating(0);
+    setUserComment("");
+    setFeedbackStatus(null);
+  };
+
+  const submitFeedback = async () => {
+    if (!report) return;
+    try {
+      setFeedbackStatus(null);
+      // 1) Create collaboration session (anonymous)
+      const sessionRes = await axios.post(
+        'http://localhost:8000/api/v1/collaboration/sessions',
+        {
+          user_id: 'anonymous',
+          analysis_id: report.claim_id || 'unknown',
+          metadata: { source: 'web_interface' }
+        },
+        { headers: { 'Content-Type': 'application/json' }, timeout: 15000 }
+      );
+      const session_id = sessionRes.data.session_id as string;
+
+      // 2) Submit feedback
+      await axios.post(
+        'http://localhost:8000/api/v1/collaboration/feedback',
+        {
+          user_id: 'anonymous',
+          session_id,
+          analysis_id: report.claim_id || 'unknown',
+          feedback_type: 'accuracy',
+          rating: Math.max(1, Math.min(5, userRating || 5)),
+          comment: userComment || undefined,
+          specific_element: 'overall',
+          metadata: { ui: 'AppEnhanced' }
+        },
+        { headers: { 'Content-Type': 'application/json' }, timeout: 15000 }
+      );
+      setFeedbackStatus('Thanks for your feedback!');
+      setUserRating(0);
+      setUserComment("");
+    } catch (e: any) {
+      setFeedbackStatus(e?.response?.data?.detail || 'Failed to submit feedback');
+    }
+  };
+
+  const submitOverride = async () => {
+    if (!report) return;
+    try {
+      setOverrideStatus(null);
+      // 1) Create session
+      const sessionRes = await axios.post(
+        'http://localhost:8000/api/v1/collaboration/sessions',
+        {
+          user_id: 'anonymous',
+          analysis_id: report.claim_id || 'unknown',
+          metadata: { source: 'web_interface' }
+        },
+        { headers: { 'Content-Type': 'application/json' }, timeout: 15000 }
+      );
+      const session_id = sessionRes.data.session_id as string;
+      // 2) Submit override
+      await axios.post(
+        'http://localhost:8000/api/v1/collaboration/overrides',
+        {
+          user_id: 'anonymous',
+          session_id,
+          analysis_id: report.claim_id || 'unknown',
+          override_type: 'verdict',
+          original_value: report.verdict,
+          new_value: overrideValue || report.verdict,
+          reason: 'User override via UI',
+          confidence: 0.5,
+        },
+        { headers: { 'Content-Type': 'application/json' }, timeout: 15000 }
+      );
+      setOverrideStatus('Override submitted');
+      setOverrideValue("");
+    } catch (e: any) {
+      setOverrideStatus(e?.response?.data?.detail || 'Failed to submit override');
+    }
   };
 
   const getLanguageName = (code: string) => {
@@ -360,6 +444,55 @@ const AppEnhanced: React.FC = () => {
                       <span className="notes-value">{report.verification.notes}</span>
                     </div>
                   )}
+                </div>
+              </div>
+
+              {/* Simple Feedback Section */}
+              <div className="feedback-section">
+                <h3 className="section-title">🗳️ Provide Feedback</h3>
+                <div className="feedback-card">
+                  <div className="feedback-row">
+                    <label>Rate accuracy:</label>
+                    <div className="rating-buttons">
+                      {[1,2,3,4,5].map(v => (
+                        <button key={v} className={`rating-btn ${userRating===v? 'active':''}`} onClick={() => setUserRating(v)}>{v}</button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="feedback-row">
+                    <label>Comment (optional):</label>
+                    <input
+                      type="text"
+                      value={userComment}
+                      onChange={(e)=>setUserComment(e.target.value)}
+                      placeholder="Share your thoughts..."
+                    />
+                  </div>
+                  <div className="feedback-actions">
+                    <button className="btn btn-primary" onClick={submitFeedback}>Submit</button>
+                    {feedbackStatus && <span className="feedback-status">{feedbackStatus}</span>}
+                  </div>
+                </div>
+              </div>
+
+              {/* Override Section */}
+              <div className="override-section">
+                <h3 className="section-title">🛠️ Human Override</h3>
+                <div className="override-card">
+                  <div className="override-row">
+                    <label>New verdict:</label>
+                    <select value={overrideValue} onChange={(e)=>setOverrideValue(e.target.value)}>
+                      <option value="">(keep)</option>
+                      <option value="true">true</option>
+                      <option value="false">false</option>
+                      <option value="mixed">mixed</option>
+                      <option value="unverifiable">unverifiable</option>
+                    </select>
+                  </div>
+                  <div className="override-actions">
+                    <button className="btn btn-primary" onClick={submitOverride}>Submit Override</button>
+                    {overrideStatus && <span className="feedback-status">{overrideStatus}</span>}
+                  </div>
                 </div>
               </div>
             </div>

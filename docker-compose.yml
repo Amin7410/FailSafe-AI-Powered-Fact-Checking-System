@@ -13,6 +13,9 @@ services:
     environment:
       - PYTHONPATH=/app
       - ENVIRONMENT=production
+      - DATABASE_URL=postgresql://failsafe:failsafe@postgres:5432/failsafe
+      - REDIS_URL=redis://redis:6379
+      - ALLOWED_ORIGINS=http://localhost:3000
     volumes:
       - ./backend/data:/app/data
       - ./backend/logs:/app/logs
@@ -55,6 +58,47 @@ services:
     restart: unless-stopped
     command: redis-server --appendonly yes
 
+  postgres:
+    image: postgres:15-alpine
+    container_name: failsafe-postgres
+    environment:
+      - POSTGRES_DB=failsafe
+      - POSTGRES_USER=failsafe
+      - POSTGRES_PASSWORD=failsafe
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - failsafe-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U failsafe -d failsafe"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  neo4j:
+    image: neo4j:5-community
+    container_name: failsafe-neo4j
+    environment:
+      - NEO4J_AUTH=neo4j/neo4jpass
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+    networks:
+      - failsafe-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7474"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
   # Nginx Reverse Proxy (optional, for production)
   nginx:
     image: nginx:alpine
@@ -78,4 +122,8 @@ networks:
 
 volumes:
   redis_data:
+    driver: local
+  postgres_data:
+    driver: local
+  neo4j_data:
     driver: local

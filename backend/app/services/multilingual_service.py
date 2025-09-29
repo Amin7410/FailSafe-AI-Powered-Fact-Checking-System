@@ -44,13 +44,17 @@ class MultilingualService:
             detected_language = self._detect_language(content)
             processing_language = preferred_language or detected_language
             
-            # Translation info
+            # Translation info (pivot to English if needed)
             translation_info = None
-            if detected_language != processing_language:
-                translation_info = self._get_translation_info(content, detected_language, processing_language)
+            pivot_lang = processing_language or detected_language
+            if detected_language != pivot_lang:
+                translation_info = self._get_translation_info(content, detected_language, pivot_lang)
             
-            # Cross-lingual mappings
-            cross_lingual_mappings = self._generate_cross_lingual_mappings(content, processing_language)
+            # Cross-lingual mappings: map concepts to English keys for KG
+            cross_lingual_mappings = self._generate_cross_lingual_mappings(
+                translation_info["translated_text"] if translation_info else content,
+                pivot_lang
+            )
             
             # SAG data for multilingual
             sag_data = self._generate_multilingual_sag_data(content, processing_language)

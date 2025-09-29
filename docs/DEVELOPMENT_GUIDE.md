@@ -145,6 +145,80 @@ RATE_LIMIT_PER_MINUTE=100
 ETHICAL_CONFIG_PATH=./app/core/ethical_config.yaml
 ```
 
+### Local LLM with Ollama
+
+1. Install Ollama
+
+```bash
+# macOS/Linux
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Windows
+# Download installer from https://ollama.com/download and run it
+```
+
+2. Start the Ollama service
+
+```bash
+ollama serve
+```
+
+3. Pull a recommended model
+
+```bash
+# Choose one based on resources
+ollama pull phi3:mini     # small, fast
+ollama pull llama3:8b     # larger, better (needs more RAM/VRAM)
+```
+
+4. Configure the backend (optional)
+
+```bash
+export OLLAMA_BASE_URL=http://localhost:11434
+export OLLAMA_MODEL=phi3:mini
+```
+
+The backend uses `backend/app/services/llm_client.py` to fetch a concise reasoning string that is appended to `verification.notes` in `SynthesisService`.
+
+### Gemini (Default Cloud LLM Option)
+
+Set environment variables:
+
+```bash
+export GEMINI_API_KEY=YOUR_KEY   # hoặc GOOGLE_API_KEY
+export GEMINI_MODEL=gemini-1.5-flash
+```
+
+Khi có `GEMINI_API_KEY/GOOGLE_API_KEY`, backend sẽ tự chọn Gemini làm LLM mặc định. Nếu không, sẽ fallback sang Ollama.
+
+### OpenAI-Compatible Backend (vLLM / llama.cpp server)
+
+Bạn có thể trỏ tới một endpoint OpenAI-compatible (như vLLM hoặc llama.cpp server):
+
+```bash
+export LLM_PROVIDER=openai_compat
+export OPENAI_COMPAT_BASE_URL=http://localhost:8001/v1
+export OPENAI_COMPAT_MODEL=llama-3-8b-instruct
+# optional
+export OPENAI_COMPAT_API_KEY=your_local_key
+```
+
+Nếu `LLM_PROVIDER` không đặt, hệ thống ưu tiên Gemini (nếu có `GEMINI_API_KEY`), ngược lại dùng Ollama.
+
+### Quantization and High-Performance Backends
+
+For large models, consider quantization and optimized runtimes:
+
+- 4-bit quantization: `bitsandbytes` or `AutoGPTQ` (Python). Reduces VRAM and speeds up inference at minor accuracy cost.
+- llama.cpp / llama-cpp-python: CPU/GPU-accelerated inference for GGUF models; low-latency local serving.
+- vLLM: High-throughput GPU inference server; excellent for batching and production.
+
+Recommendations:
+
+1) Start with Ollama for simplicity. If latency is high, try llama-cpp-python with a quantized GGUF (`Q4_K_M`).
+2) For multi-user throughput, deploy vLLM and point the client at its endpoint.
+3) Keep prompts concise. Log average latency and token counts to guide optimization.
+
 ## Backend Development
 
 ### Architecture Overview

@@ -66,6 +66,14 @@ export const ReportDisplay: React.FC<ReportDisplayProps> = ({
               {Math.round(report.confidence * 100)}% ({confidenceInfo.level})
             </span>
           </div>
+          <div className="indicator-badges">
+            {/* Bias indicator (placeholder) */}
+            <span className="badge bias" title="Potential source bias indicator">BIAS</span>
+            {/* Hallucination indicator derived from verification notes (placeholder parse) */}
+            {report.verification.notes && report.verification.notes.includes('hallucination_risk=high') ? (
+              <span className="badge hallucination" title="High hallucination risk">HALLUCINATION</span>
+            ) : null}
+          </div>
         </div>
         
         {onFeedback && (

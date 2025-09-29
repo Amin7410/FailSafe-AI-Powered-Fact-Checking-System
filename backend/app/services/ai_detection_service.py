@@ -62,6 +62,10 @@ class AIDetectionService:
             # 4. LLM detector (simplified)
             llm_score = self._llm_detection(content)
             method_scores["llm_detector"] = llm_score
+
+            # 5. Noise-injection stability (simple paraphrase/remove punctuation test)
+            stability_score = self._noise_injection_stability(content)
+            method_scores["stability"] = stability_score
             
             # Ensemble voting
             ensemble_score = statistics.mean(method_scores.values())
@@ -218,6 +222,28 @@ class AIDetectionService:
             
         except Exception as e:
             logger.warning(f"LLM detection error: {e}")
+            return 0.0
+
+    def _noise_injection_stability(self, content: str) -> float:
+        """Apply a simple perturbation and compare heuristic signals.
+
+        If detection signals stay similar after perturbation, increase AI likelihood slightly.
+        """
+        try:
+            if not content or len(content.split()) < 20:
+                return 0.0
+            # Perturbation: remove punctuation and lowercase
+            import re as _re
+            perturbed = _re.sub(r"[\.,;:!?]", "", content).lower()
+            s1 = self._analyze_stylometry(content)
+            s2 = self._analyze_stylometry(perturbed)
+            p1 = self._analyze_patterns(content)
+            p2 = self._analyze_patterns(perturbed)
+            delta = abs((s1 + p1) - (s2 + p2))
+            # Smaller delta => more stable => more likely AI (return inverse)
+            return float(max(0.0, min(1.0, 1.0 - min(1.0, delta))))
+        except Exception as e:
+            logger.warning(f"Stability check error: {e}")
             return 0.0
 
 

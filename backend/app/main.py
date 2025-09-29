@@ -7,6 +7,7 @@ from .db.session import Base, engine
 from .core.middleware import RequestIDLoggingMiddleware, RateLimitMiddleware
 from .core.config import get_settings
 from .services.monitoring_service import monitoring_service
+from .services.embedding_service import get_embedding_model
 import logging
 
 
@@ -27,7 +28,7 @@ def create_app() -> FastAPI:
     app.add_middleware(RateLimitMiddleware, max_per_minute=settings.rate_limit_per_minute)
     app.add_middleware(
         CORSMiddleware,
-         allow_origins=["*"],
+        allow_origins=settings.allowed_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -57,6 +58,8 @@ async def startup_event():
     try:
         # Start monitoring
         monitoring_service.start_monitoring()
+        # Preload embedding model to reduce first-request latency
+        get_embedding_model()
         logging.info("FailSafe API started successfully")
     except Exception as e:
         logging.error(f"Failed to start FailSafe API: {e}")

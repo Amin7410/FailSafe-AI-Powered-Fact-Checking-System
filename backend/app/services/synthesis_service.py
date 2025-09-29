@@ -6,6 +6,7 @@ from ..models.claim import ClaimRequest
 import logging
 import uuid
 from datetime import datetime
+from .llm_client import concise_reasoning_for_verdict
 
 logger = logging.getLogger(__name__)
 
@@ -57,13 +58,24 @@ class SynthesisService:
                 supported_languages=multilingual_data.get("cross_lingual_analysis", {}).get("supported_languages", [])
             )
 
+            # Create concise LLM reasoning for the final verdict (best-effort, optional)
+            try:
+                evidence_titles = [item.get("title") or "" for item in evidence][:5]
+                llm_reasoning = concise_reasoning_for_verdict(verdict, original_input.text or "", evidence_titles)
+            except Exception:
+                llm_reasoning = ""
+
             # Create the final report response.
             report = ReportResponse(
                 claim_id=analysis_id,
                 verdict=verdict,
                 confidence=overall_confidence,
                 evidence=evidence_items,
-                verification=verification,
+                verification=VerificationResult(
+                    confidence=verification.confidence,
+                    method=verification.method,
+                    notes=(verification.notes or "") + (f"; reasoning={llm_reasoning}" if llm_reasoning else "")
+                ),
                 fallacies=fallacies,
                 ai_detection=ai_detection,
                 multilingual=multilingual_result,
@@ -116,14 +128,14 @@ class SynthesisService:
     def _determine_verdict(self, verification_confidence: float, overall_confidence: float) -> str:
         """Determine final verdict based on verification and confidence"""
         if verification_confidence < 0.1:
-            return "Unverifiable"
+            return "unverifiable"
 
         if overall_confidence >= self.confidence_thresholds["high"]:
-            return "True"
+            return "true"
         elif overall_confidence >= self.confidence_thresholds["medium"]:
-            return "Mixed"
+            return "mixed"
         else:
-            return "False"
+            return "false"
 
     def _calculate_processing_time(self) -> int:
         """Calculate processing time (placeholder)"""

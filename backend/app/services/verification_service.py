@@ -24,6 +24,8 @@ from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassifica
 import torch
 
 from ..models.report import VerificationResult
+from .llm_client import OllamaClient, preliminary_reasoning_for_claim
+from .embedding_service import embed_texts
 from ..core.config import get_settings
 
 
@@ -40,27 +42,36 @@ class SelfReflectionAgent:
         ]
     
     def reflect_on_output(self, output: str, evidence: List[Dict], context: str) -> Dict[str, Any]:
-        """Perform self-reflection on AI output"""
-        reflection_scores = []
-        reflection_details = []
-        
-        for question in self.reflection_questions:
-            # Simple heuristic-based reflection for MVP
-            score = self._evaluate_question(question, output, evidence, context)
-            reflection_scores.append(score)
-            reflection_details.append({
-                "question": question,
-                "score": score,
-                "reasoning": self._get_reasoning(question, output, evidence)
-            })
-        
-        overall_score = statistics.mean(reflection_scores)
-        
+        """LLM-based reflection returning an overall score and brief reasoning."""
+        client = OllamaClient()
+        titles = "; ".join([str(ev.get("title") or "") for ev in evidence][:5]) or "(no titles)"
+        questions = " "; join(self.reflection_questions)  # type: ignore[attr-defined]
+        try:
+            questions = " ".join(self.reflection_questions)
+        except Exception:
+            questions = ""
+        prompt = (
+            "Assess the following analysis for hallucination risk.\n"
+            "Consider these questions: " + questions + "\n\n"
+            f"Claim/context: {context}\n"
+            f"Evidence titles: {titles}\n"
+            f"Analysis: {output}\n\n"
+            "Respond as: score=0.x | one-sentence reasoning"
+        )
+        text = client.generate(prompt)
+        score = 0.5
+        if "score=" in text:
+            try:
+                score_str = text.split("score=")[-1].split("|")[0].strip()
+                score = float(score_str)
+            except Exception:
+                score = 0.5
+        hallucination_risk = "high" if score < 0.3 else "medium" if score < 0.7 else "low"
         return {
-            "overall_score": overall_score,
-            "individual_scores": reflection_scores,
-            "details": reflection_details,
-            "hallucination_risk": "high" if overall_score < 0.3 else "medium" if overall_score < 0.7 else "low"
+            "overall_score": max(0.0, min(1.0, score)),
+            "individual_scores": [],
+            "details": [{"summary": text}],
+            "hallucination_risk": hallucination_risk,
         }
     
     def _evaluate_question(self, question: str, output: str, evidence: List[Dict], context: str) -> float:
@@ -136,42 +147,36 @@ class MultiAgentVerifier:
             print(f"Warning: Could not initialize verification agents: {e}")
     
     def cross_check_verification(self, content: str, evidence: List[Dict], sag: Dict) -> Dict[str, Any]:
-        """Perform multi-agent cross-check verification"""
-        if not self.agents["fallback"]:
-            return {"consensus": 0.5, "disagreement": 0.0, "agents": []}
-        
-        # Simulate multiple agents for MVP
-        agent_results = []
-        
-        # Agent 1: Evidence-based verification
-        agent1_result = self._verify_with_evidence(content, evidence)
-        agent_results.append({
-            "agent": "evidence_verifier",
-            "confidence": agent1_result["confidence"],
-            "reasoning": agent1_result["reasoning"]
-        })
-        
-        # Agent 2: Logical consistency verification
-        agent2_result = self._verify_logical_consistency(content, sag)
-        agent_results.append({
-            "agent": "logic_verifier", 
-            "confidence": agent2_result["confidence"],
-            "reasoning": agent2_result["reasoning"]
-        })
-        
-        # Agent 3: Factual accuracy verification
-        agent3_result = self._verify_factual_accuracy(content, evidence)
-        agent_results.append({
-            "agent": "fact_verifier",
-            "confidence": agent3_result["confidence"], 
-            "reasoning": agent3_result["reasoning"]
-        })
-        
-        # Calculate consensus
-        confidences = [result["confidence"] for result in agent_results]
-        consensus = statistics.mean(confidences)
+        """Perform multi-agent cross-check using LLM role prompts (skeptic/supporter)."""
+        agent_results: List[Dict[str, Any]] = []
+        client = OllamaClient()
+        titles_text = ", ".join([str(ev.get("title") or "") for ev in evidence][:5]) or "(none)"
+        roles = [
+            ("skeptic", "Act as a skeptic. Identify weaknesses or unsupported parts of the claim given these evidence titles."),
+            ("supporter", "Act as a supporter. Identify support for the claim from these evidence titles."),
+        ]
+        confidences: List[float] = []
+        for name, instruction in roles:
+            prompt = (
+                f"{instruction}\n\n"
+                f"Claim: {content}\n"
+                f"Evidence Titles: {titles_text}\n"
+                f"Answer: one sentence plus confidence=0.x"
+            )
+            out = client.generate(prompt)
+            conf = 0.5
+            if "confidence=" in out:
+                try:
+                    conf_str = out.split("confidence=")[-1].strip().split()[0]
+                    conf = float(conf_str.strip().rstrip(".,;:"))
+                except Exception:
+                    conf = 0.5
+            conf = max(0.0, min(1.0, conf))
+            agent_results.append({"agent": name, "confidence": conf, "reasoning": out})
+            confidences.append(conf)
+
+        consensus = statistics.mean(confidences) if confidences else 0.5
         disagreement = statistics.stdev(confidences) if len(confidences) > 1 else 0.0
-        
         return {
             "consensus": consensus,
             "disagreement": disagreement,
@@ -260,7 +265,10 @@ class RetrievalFirstPipeline:
         self.min_evidence_count = 2
     
     def validate_evidence_basis(self, content: str, evidence: List[Dict], sag: Dict) -> Dict[str, Any]:
-        """Validate that response is based on retrieved evidence"""
+        """Validate that response is based on retrieved evidence
+
+        MVP: evidence quality/quantity. Stage 2: add reasoning-evidence embedding similarity.
+        """
         if not evidence:
             return {
                 "is_evidence_based": False,
@@ -268,34 +276,43 @@ class RetrievalFirstPipeline:
                 "reasoning": "No evidence retrieved"
             }
         
-        # Check evidence quality
-        evidence_scores = [ev.get("score", 0.0) for ev in evidence]
-        high_quality_evidence = [score for score in evidence_scores if score >= self.evidence_threshold]
-        
-        # Check evidence quantity
+        # Evidence quality and quantity
+        evidence_scores = [float(ev.get("score", 0.0)) for ev in evidence]
+        high_quality_evidence = [s for s in evidence_scores if s >= self.evidence_threshold]
+
         sufficient_evidence = len(high_quality_evidence) >= self.min_evidence_count
-        
-        # Check content-evidence alignment
-        content_lower = content.lower()
-        evidence_alignment = 0.0
-        
-        for ev in evidence:
-            ev_text = f"{ev.get('title', '')} {ev.get('snippet', '')}".lower()
-            if any(word in content_lower for word in ev_text.split()[:10]):  # Check first 10 words
-                evidence_alignment += 1
-        
-        alignment_score = evidence_alignment / len(evidence) if evidence else 0.0
-        
-        is_evidence_based = sufficient_evidence and alignment_score > 0.3
-        confidence = (len(high_quality_evidence) / len(evidence)) * alignment_score if evidence else 0.0
+
+        # Confidence derived from proportion and average quality
+        proportion_hq = (len(high_quality_evidence) / len(evidence)) if evidence else 0.0
+        avg_quality = sum(high_quality_evidence) / len(high_quality_evidence) if high_quality_evidence else 0.0
+
+        # Stage 2: reasoning-evidence embedding similarity
+        try:
+            ev_texts = [str(ev.get("snippet") or ev.get("title") or "") for ev in evidence]
+            reasoning = preliminary_reasoning_for_claim(content, [str(ev.get("title") or "") for ev in evidence])
+            if reasoning:
+                rv = embed_texts([reasoning])
+                ev_vecs = embed_texts(ev_texts)
+                import numpy as np
+                rv_norm = rv / (np.linalg.norm(rv, axis=1, keepdims=True) + 1e-8)
+                ev_norm = ev_vecs / (np.linalg.norm(ev_vecs, axis=1, keepdims=True) + 1e-8)
+                sims = (rv_norm @ ev_norm.T)[0]
+                sim_score = float(np.clip(float(np.max(sims)) if sims.size > 0 else 0.0, 0.0, 1.0))
+            else:
+                sim_score = 0.0
+        except Exception:
+            sim_score = 0.0
+
+        is_evidence_based = sufficient_evidence and (sim_score >= 0.3)
+        confidence = max(0.0, min(1.0, 0.5 * proportion_hq + 0.3 * avg_quality + 0.2 * sim_score))
         
         return {
             "is_evidence_based": is_evidence_based,
             "confidence": confidence,
-            "reasoning": f"Evidence quality: {len(high_quality_evidence)}/{len(evidence)}, Alignment: {alignment_score:.2f}",
+            "reasoning": f"High-quality evidence: {len(high_quality_evidence)}/{len(evidence)}; avg_quality={avg_quality:.2f}; sim={sim_score:.2f}",
             "evidence_count": len(evidence),
             "high_quality_count": len(high_quality_evidence),
-            "alignment_score": alignment_score
+            "alignment_score": None
         }
 
 

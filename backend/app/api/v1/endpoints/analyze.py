@@ -1,6 +1,6 @@
 # FILE: backend/app/api/v1/endpoints/analyze.py
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends, Header
 from app.models.claim import ClaimRequest
 from app.models.report import ReportResponse, AIDetectionResult # Đảm bảo import AIDetectionResult
 from app.services.ingestion_service import IngestionService
@@ -15,8 +15,15 @@ from app.services.multilingual_service import MultilingualService
 
 router = APIRouter(prefix="/analyze")
 
+def _require_api_key(x_api_key: str = Header(None)) -> None:
+    from app.core.config import get_settings
+    settings = get_settings()
+    if settings.api_keys and (x_api_key not in settings.api_keys):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
 @router.post("", response_model=ReportResponse)
-def analyze_claim(payload: ClaimRequest) -> ReportResponse:
+def analyze_claim(payload: ClaimRequest, _: None = Depends(_require_api_key)) -> ReportResponse:
     try:
         ingestion = IngestionService()
         content = ingestion.process_input(payload)

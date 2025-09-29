@@ -18,6 +18,10 @@ class Settings:
 
     def __init__(self) -> None:
         self.ethical = self._load_ethical()
+        # Deployment / security
+        self.allowed_origins: List[str] = self._load_allowed_origins()
+        self.api_key_header: str = "X-API-Key"
+        self.api_keys: List[str] = self._load_api_keys()
 
     # Rate Limiting
     @property
@@ -276,6 +280,24 @@ class Settings:
             with ETHICAL_CONFIG_PATH.open("r", encoding="utf-8") as f:
                 return yaml.safe_load(f) or {}
         return {"bias_threshold": 0.2, "retention_days": 30, "consent_required": True}
+
+    def _load_allowed_origins(self) -> List[str]:
+        # Try environment variable FIRST, else use ethical_config
+        import os
+        env = os.getenv("ALLOWED_ORIGINS")
+        if env:
+            return [o.strip() for o in env.split(",") if o.strip()]
+        web = self.ethical.get("web", {}) if isinstance(self.ethical, dict) else {}
+        origins = web.get("allowed_origins", ["http://localhost:3000"]) if isinstance(web, dict) else ["http://localhost:3000"]
+        return list(origins)
+
+    def _load_api_keys(self) -> List[str]:
+        import os
+        keys = os.getenv("FAILSAFE_API_KEYS")
+        if keys:
+            return [k.strip() for k in keys.split(",") if k.strip()]
+        sec = self.ethical.get("security", {}) if isinstance(self.ethical, dict) else {}
+        return list(sec.get("api_keys", []))
 
 
 @lru_cache(maxsize=1)

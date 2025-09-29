@@ -21,6 +21,7 @@ import torch
 
 from ..models.report import FallacyItem
 from ..core.config import get_settings
+from .llm_client import OllamaClient
 
 
 class RuleBasedFallacyDetector:
@@ -222,31 +223,62 @@ class LLMBasedFallacyDetector:
             self.tokenizer = None
     
     def detect_fallacies(self, content: str) -> List[FallacyItem]:
-        """Detect fallacies using LLM analysis"""
-        if self.model is None or self.tokenizer is None:
-            return []
-        
+        """Detect fallacies using LLM analysis with a structured prompt."""
+        # Prefer LLM path (Ollama); gracefully fall back to heuristic if unavailable
         try:
-            # Simple heuristic-based detection for MVP
-            # In production, this would use fine-tuned models on fallacy datasets
+            client = OllamaClient()
+            instruction = (
+                "Identify logical fallacies in the following text. Return a JSON array of objects with fields: "
+                "type (string), span (string or null), explanation (string). Keep concise spans."
+            )
+            prompt = f"{instruction}\n\nText:\n{content}\n\nJSON:"
+            raw = client.generate(prompt)
+            parsed: List[dict] = []
+            # Try to locate JSON array in output
+            import json as _json
+            try:
+                # direct parse
+                parsed = _json.loads(raw)
+            except Exception:
+                # fallback: extract between first [ and last ]
+                if "[" in raw and "]" in raw:
+                    segment = raw[raw.find("[") : raw.rfind("]") + 1]
+                    try:
+                        parsed = _json.loads(segment)
+                    except Exception:
+                        parsed = []
+            llm_items: List[FallacyItem] = []
+            for it in parsed[:10]:  # limit
+                t = str(it.get("type", "")).strip()
+                if not t:
+                    continue
+                span = it.get("span")
+                if span is not None:
+                    span = str(span)
+                expl = it.get("explanation")
+                if expl is not None:
+                    expl = str(expl)
+                llm_items.append(FallacyItem(type=t, span=span, explanation=expl))
+            if llm_items:
+                return llm_items
+        except Exception:
+            pass
+
+        # Heuristic fallback
+        try:
             fallacies = []
-            
-            # Check for complex logical structures
             if self._has_complex_logical_structure(content):
                 fallacies.append(FallacyItem(
                     type="complex_logical_error",
                     span=None,
                     explanation="Complex logical structure detected - may contain subtle fallacies"
                 ))
-            
-            # Check for argumentative patterns
             if self._has_argumentative_patterns(content):
                 fallacies.append(FallacyItem(
                     type="argumentative_pattern",
                     span=None,
                     explanation="Argumentative patterns detected - may contain logical fallacies"
                 ))
-            
             return fallacies
         except Exception:
             return []
