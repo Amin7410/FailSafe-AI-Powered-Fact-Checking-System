@@ -1,6 +1,6 @@
 # FILE: backend/app/api/v1/endpoints/analyze.py
 
-from fastapi import APIRouter, HTTPException, Depends, Header
+from fastapi import APIRouter, HTTPException, Depends, Header, Request 
 from app.models.claim import ClaimRequest
 from app.models.report import ReportResponse, AIDetectionResult # Đảm bảo import AIDetectionResult
 from app.services.ingestion_service import IngestionService
@@ -21,9 +21,16 @@ def _require_api_key(x_api_key: str = Header(None)) -> None:
     if settings.api_keys and (x_api_key not in settings.api_keys):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
+async def api_key_dependency(request: Request, x_api_key: str = Header(None)):
+    """
+    Dependency wrapper that skips API key check for OPTIONS requests.
+    """
+    if request.method == "OPTIONS":
+        return
+    _require_api_key(x_api_key)
 
 @router.post("", response_model=ReportResponse)
-def analyze_claim(payload: ClaimRequest, _: None = Depends(_require_api_key)) -> ReportResponse:
+def analyze_claim(payload: ClaimRequest, _: None = Depends(api_key_dependency)) -> ReportResponse:
     try:
         ingestion = IngestionService()
         content = ingestion.process_input(payload)

@@ -62,6 +62,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self.requests = {}  # In production, use Redis or similar
     
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        
         # Get client IP
         client_ip = request.client.host if request.client else "unknown"
         current_time = time.time()

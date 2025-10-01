@@ -45,7 +45,7 @@ class SelfReflectionAgent:
         """LLM-based reflection returning an overall score and brief reasoning."""
         client = OllamaClient()
         titles = "; ".join([str(ev.get("title") or "") for ev in evidence][:5]) or "(no titles)"
-        questions = " "; join(self.reflection_questions)  # type: ignore[attr-defined]
+        questions = " ".join(self.reflection_questions)
         try:
             questions = " ".join(self.reflection_questions)
         except Exception:

@@ -20,19 +20,22 @@ def create_app() -> FastAPI:
         redoc_url="/redoc"
     )
     settings = get_settings()
-    
-    # Add middleware in order (last added = first executed)
-    app.add_middleware(GZipMiddleware, minimum_size=1000)
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
-    app.add_middleware(RequestIDLoggingMiddleware)
-    app.add_middleware(RateLimitMiddleware, max_per_minute=settings.rate_limit_per_minute)
+
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.allowed_origins,
         allow_credentials=True,
         allow_methods=["*"],
-        allow_headers=["*"],
+        allow_headers=["*"]
     )
+    
+    # Add middleware in order (last added = first executed)
+    # app.add_middleware(GZipMiddleware, minimum_size=1000)
+    # app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
+    # app.add_middleware(RequestIDLoggingMiddleware)
+    # app.add_middleware(RateLimitMiddleware, max_per_minute=settings.rate_limit_per_minute)
+    
     
     # Include routers
     app.include_router(api_router, prefix="/api/v1")

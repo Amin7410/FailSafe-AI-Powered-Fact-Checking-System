@@ -84,7 +84,9 @@ export function App() {
     setReport(null)
     try {
       const payload = mode === 'url' ? { url } : { text }
-      const res = await axios.post<ReportResponse>('http://localhost:8000/api/v1/analyze', payload)
+      const res = await axios.post<ReportResponse>('http://localhost:8000/api/v1/analyze', payload,{
+        timeout: 60000
+      })
       setReport(res.data)
     } catch (e: any) {
       setError(e?.response?.data?.detail ? JSON.stringify(e.response.data.detail) : String(e))
