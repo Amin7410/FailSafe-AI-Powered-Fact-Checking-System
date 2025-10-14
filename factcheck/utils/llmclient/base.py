@@ -1,7 +1,11 @@
+# ./factcheck/utils/llmclient/base.py
+# --- PHIÊN BẢN NÂNG CAO VỚI CACHING TÍCH HỢP ---
+
 import time
 import asyncio
+import json
 from abc import abstractmethod
-from functools import partial
+from functools import partial, lru_cache
 from collections import deque
 
 from ..data_class import TokenUsage
@@ -23,13 +27,28 @@ class BaseClient:
         self.total_traffic = 0
         self.usage = TokenUsage(model=model)
 
-    @abstractmethod
-    def _call(self, messages: str):
-        """Internal function to call the API."""
-        pass
+    @staticmethod
+    def _make_hashable(data):
+        """Converts a list of dicts into a hashable JSON string."""
+        # Sắp xếp các key để đảm bảo thứ tự nhất quán, tạo ra hash giống nhau
+        return json.dumps(data, sort_keys=True)
+
+    # Decorator được áp dụng trực tiếp cho hàm _call
+    @lru_cache(maxsize=256)
+    def _cached_call_wrapper(self, messages_hashable: str, **kwargs):
+        """A cached wrapper for the _call method."""
+        # Chuyển đổi chuỗi JSON trở lại cấu trúc dữ liệu Python
+        messages = json.loads(messages_hashable)
+        # Gọi hàm _call thực sự mà các lớp con sẽ implement
+        return self._call(messages, **kwargs)
 
     @abstractmethod
-    def _log_usage(self):
+    def _call(self, messages: list, **kwargs):
+        """Internal function to call the API. Must be implemented by subclasses."""
+        pass
+    
+    @abstractmethod
+    def _log_usage(self, usage_dict):
         """Log the usage of tokens, should be used in each client's _call method."""
         pass
 
@@ -55,13 +74,20 @@ class BaseClient:
         assert type(seed) is int, "Seed must be an integer."
         assert len(messages) == 1, "Only one message is allowed for this function."
 
+        # Chuyển đổi `messages` thành một chuỗi hashable
+        hashable_messages = self._make_hashable(messages[0])
+        
         r = ""
         for _ in range(num_retries):
             try:
-                r = self._call(messages[0], seed=seed)
-                break
+                # Gọi hàm wrapper đã được cache
+                r = self._cached_call_wrapper(hashable_messages, seed=seed)
+                if r:
+                    break
             except Exception as e:
                 print(f"Error LLM Client call: {e} Retrying...")
+                # Nếu có lỗi, xóa key này khỏi cache để lần sau có thể thử lại
+                self._cached_call_wrapper.cache_clear() 
                 time.sleep(waiting_time)
 
         if r == "":
@@ -71,15 +97,19 @@ class BaseClient:
     def set_model(self, model: str):
         self.model = model
 
+    # Lưu ý: multi_call không được cache ở đây vì nó thường được dùng cho
+    # các yêu cầu khác nhau. Việc cache sẽ phức tạp và ít hiệu quả.
     async def _async_call(self, messages: list, **kwargs):
-        """Calls ChatGPT asynchronously, tracks traffic, and enforces rate limits."""
+        """Calls the API asynchronously, tracks traffic, and enforces rate limits."""
         while len(self.traffic_queue) >= self.max_requests_per_minute:
             await asyncio.sleep(1)
             self._expire_old_traffic()
 
         loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(None, partial(self._call, messages, **kwargs))
-
+        # Chuyển đổi messages thành hashable và gọi wrapper đã được cache
+        hashable_messages = self._make_hashable(messages)
+        response = await loop.run_in_executor(None, partial(self._cached_call_wrapper, hashable_messages, **kwargs))
+        
         self.total_traffic += self.get_request_length(messages)
         self.traffic_queue.append((time.time(), self.get_request_length(messages)))
 

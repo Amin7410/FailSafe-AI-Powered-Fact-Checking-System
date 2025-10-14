@@ -1,5 +1,8 @@
+# ./factcheck/core/Retriever/base.py 
+
 from concurrent.futures import ProcessPoolExecutor
 import os
+import torch
 from copy import deepcopy
 from factcheck.utils.web_util import parse_response, crawl_web
 from factcheck.utils.logger import CustomLogger

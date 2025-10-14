@@ -1,8 +1,9 @@
+# ./factcheck/__init__.py
+
 import concurrent.futures
 import time
 import tiktoken
-
-from dataclasses import dataclass, asdict
+from dataclasses import asdict
 from factcheck.utils.llmclient import CLIENTS, model2client
 from factcheck.utils.prompt import prompt_mapper
 from factcheck.utils.logger import CustomLogger
@@ -15,6 +16,7 @@ from factcheck.core import (
     retriever_mapper,
     ClaimVerify,
 )
+from .core.Screening import MetadataAnalyzer, StylometryAnalyzer
 
 logger = CustomLogger(__name__).getlog()
 
@@ -22,27 +24,25 @@ logger = CustomLogger(__name__).getlog()
 class FactCheck:
     def __init__(
         self,
-        default_model: str = "gpt-4o",
+        default_model: str = "gemini-2.5-flash", 
         client: str = None,
-        prompt: str = "chatgpt_prompt",
-        retriever: str = "serper",
+        prompt: str = "gemini_prompt",
+        retriever: str = "hybrid",
         decompose_model: str = None,
         checkworthy_model: str = None,
         query_generator_model: str = None,
         evidence_retrieval_model: str = None,
-        claim_verify_model: str = None,  # "gpt-3.5-turbo",
+        claim_verify_model: str = None,
         api_config: dict = None,
         num_seed_retries: int = 3,
     ):
-        # TODO: better handle raw token count
+        
         self.encoding = tiktoken.get_encoding("cl100k_base")
 
         self.prompt = prompt_mapper(prompt_name=prompt)
-
-        # load configures for API
+        
         self.load_config(api_config=api_config)
 
-        # llms for each step (sub-module)
         step_models = {
             "decompose_model": decompose_model,
             "checkworthy_model": checkworthy_model,
@@ -62,7 +62,9 @@ class FactCheck:
                 LLMClient = model2client(_model_name)
             setattr(self, key, LLMClient(model=_model_name, api_config=self.api_config))
 
-        # sub-modules
+        self.metadata_analyzer = MetadataAnalyzer()
+        self.stylometry_analyzer = StylometryAnalyzer()
+
         self.decomposer = Decompose(llm_client=self.decompose_model, prompt=self.prompt)
         self.checkworthy = Checkworthy(llm_client=self.checkworthy_model, prompt=self.prompt)
         self.query_generator = QueryGenerator(llm_client=self.query_generator_model, prompt=self.prompt)
@@ -76,163 +78,210 @@ class FactCheck:
         logger.info("===Sub-modules Init Finished===")
 
     def load_config(self, api_config: dict) -> None:
-        # Load API config
         self.api_config = load_api_config(api_config)
 
+    def _screen_input(self, raw_text: str):
+        logger.info("--- Running Layer 0: Rapid Screening ---")
+        metadata_result = self.metadata_analyzer.analyze(raw_text)
+        style_result = self.stylometry_analyzer.analyze(raw_text)
+
+        trust_level = metadata_result.get("trust_level")
+        sensationalism_score = style_result.get("sensationalism_score", 0.0)
+
+        logger.info(f"Screening results: Trust={trust_level}, Sensationalism Score={sensationalism_score:.2f}")
+
+        if trust_level == 'low' and sensationalism_score > 0.5:
+            warning_message = (
+                f"Early Warning: This content originates from a low-trust source "
+                f"('{metadata_result.get('reason')}') and exhibits a highly sensationalist writing style "
+                f"(score: {sensationalism_score:.2f}). There is a high probability of misinformation."
+            )
+            logger.warning(f"Early Exit triggered: {warning_message}")
+            
+            early_exit_output = self._finalize_factcheck(
+                raw_text=raw_text,
+                claim_detail=[],
+                summary_override={"message": warning_message, "status": "SCREENED_OUT"}
+            )
+            return True, early_exit_output
+
+        analysis_data = {"metadata": metadata_result, "style": style_result}
+        return False, analysis_data
+
     def check_text(self, raw_text: str):
-        # first clear current usage
         self._reset_usage()
 
+        should_exit, screen_result = self._screen_input(raw_text)
+        if should_exit:
+            return screen_result
+
+        logger.info("--- Layer 0 passed. Proceeding with full pipeline. ---")
         st_time = time.time()
-        # step 1
-        claims = self.decomposer.getclaims(doc=raw_text, num_retries=self.num_seed_retries)
-        # Parallel run restore claims and checkworthy
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future_claim2doc = executor.submit(
-                self.decomposer.restore_claims, doc=raw_text, claims=claims, num_retries=self.num_seed_retries
+        
+        logger.info("Decomposing text into a Structured Argumentation Graph (SAG)...")
+        sag = self.decomposer.create_sag(doc=raw_text, num_retries=self.num_seed_retries)
+        
+        ### SỬA ĐỔI 1: Trích xuất claims từ các node có type là "Claim" ###
+        claims_from_nodes = [node['label'] for node in sag.get('nodes', []) if node.get('type') == 'Claim']
+
+        if not claims_from_nodes:
+            logger.warning("SAG decomposition did not return any verifiable claims. Finalizing report.")
+            # ### SỬA ĐỔI 2: Truyền sag vào finalize để sau này có thể dùng ###
+            return self._finalize_factcheck(raw_text=raw_text, sag=sag, claim_detail=[], return_dict=True)
+
+        ### SỬA ĐỔI 3: Loại bỏ restore_claims song song vì nó không còn phù hợp ###
+        # Thay vào đó, chúng ta sẽ chạy Checkworthy một cách tuần tự.
+        # Trong tương lai, restore có thể được điều chỉnh để hoạt động với node_id.
+        logger.info("Identifying check-worthy claims from SAG nodes...")
+        checkworthy_claims, claim2checkworthy = self.checkworthy.identify_checkworthiness(
+            claims_from_nodes, num_retries=self.num_seed_retries
+        )
+
+        if not checkworthy_claims:
+            logger.info("No check-worthy claims found after analysis. Finalizing report.")
+            # Chúng ta vẫn cần tạo claim_detail cho các claim không đáng kiểm chứng
+            claim_detail = self._merge_claim_details(
+                original_claims=claims_from_nodes, # Dùng list claims gốc
+                claim2checkworthy=claim2checkworthy,
+                claim2queries={}, 
+                claim2verifications={}
             )
-            # step 2
-            future_checkworthy_claims = executor.submit(
-                self.checkworthy.identify_checkworthiness, claims, num_retries=self.num_seed_retries
-            )
-            # step 3
-            future_claim_queries_dict = executor.submit(self.query_generator.generate_query, claims=claims)
-
-            # Wait for all futures to complete
-            claim2doc = future_claim2doc.result()
-            checkworthy_claims, claim2checkworthy = future_checkworthy_claims.result()
-            claim_queries_dict = future_claim_queries_dict.result()
-
-        checkworthy_claims_S = set(checkworthy_claims)
-        claim_queries_dict = {k: v for k, v in claim_queries_dict.items() if k in checkworthy_claims_S}
-
-        for i, (claim, origin) in enumerate(claim2doc.items()):
-            logger.info(f"== raw_text claims {i} --- {claim} --- {origin}")
-        for i, claim in enumerate(checkworthy_claims):
-            logger.info(f"== Checkworthy claims {i}: {claim}")
-
-        if checkworthy_claims == []:
-            return self._finalize_factcheck(raw_text=raw_text, claim_detail=[], return_dict=True)
-
-        for k, v in claim_queries_dict.items():
-            logger.info(f"== Claim: {k} --- Queries: {v}")
-
+            return self._finalize_factcheck(raw_text=raw_text, sag=sag, claim_detail=claim_detail, return_dict=True)
+        
+        logger.info(f"Generating queries for {len(checkworthy_claims)} check-worthy claims...")
+        claim_queries_dict = self.query_generator.generate_query(claims=checkworthy_claims)
         step123_time = time.time()
-
-        # step 4
+        
+        logger.info("Retrieving evidence...")
         claim_evidences_dict = self.evidence_crawler.retrieve_evidence(claim_queries_dict=claim_queries_dict)
-        for claim, evidences in claim_evidences_dict.items():
-            logger.info(f"== Claim: {claim}")
-            logger.info(f"== Evidence: {evidences}\n")
         step4_time = time.time()
-
-        # step 5
+        
+        logger.info("Verifying claims against evidence...")
         claim_verifications_dict = self.claimverify.verify_claims(claim_evidences_dict=claim_evidences_dict)
-        for k, v in claim_verifications_dict.items():
-            logger.info(f"== Claim: {k} --- Verify: {v}")
         step5_time = time.time()
+
         logger.info(
-            f"== State: Done! \n Total time: {step5_time-st_time:.2f}s. (create claims:{step123_time-st_time:.2f}s |||  retrieve:{step4_time-step123_time:.2f}s ||| verify:{step5_time-step4_time:.2f}s)"
+            f"== State: Done! \n Total time: {step5_time - st_time:.2f}s. "
+            f"(create claims:{step123_time - st_time:.2f}s ||| "
+            f"retrieve:{step4_time - step123_time:.2f}s ||| "
+            f"verify:{step5_time - step4_time:.2f}s)"
         )
 
         claim_detail = self._merge_claim_details(
-            claim2doc=claim2doc,
+            original_claims=claims_from_nodes, # Dùng list claims gốc
             claim2checkworthy=claim2checkworthy,
             claim2queries=claim_queries_dict,
-            claim2evidences=claim_evidences_dict,
             claim2verifications=claim_verifications_dict,
         )
 
-        return self._finalize_factcheck(raw_text=raw_text, claim_detail=claim_detail, return_dict=True)
+        # ### SỬA ĐỔI 4: Truyền cả sag và claim_detail vào hàm cuối cùng ###
+        return self._finalize_factcheck(raw_text=raw_text, sag=sag, claim_detail=claim_detail, return_dict=True)
 
     def _get_usage(self):
-        return PipelineUsage(**{attr: getattr(self, attr).llm_client.usage for attr in self.attr_list})
+        total_usage = {}
+        for attr in self.attr_list:
+            module = getattr(self, attr)
+            if hasattr(module, 'llm_client'):
+                total_usage[attr] = module.llm_client.usage
+        return PipelineUsage(**total_usage)
 
     def _reset_usage(self):
         for attr in self.attr_list:
-            getattr(self, attr).llm_client.reset_usage()
+            module = getattr(self, attr)
+            if hasattr(module, 'llm_client'):
+                module.llm_client.reset_usage()
 
+    ### SỬA ĐỔI 5: Cập nhật hàm _merge_claim_details để không phụ thuộc vào `claim2doc` ###
     def _merge_claim_details(
-        self, claim2doc: dict, claim2checkworthy: dict, claim2queries: dict, claim2evidences: dict, claim2verifications: dict
+        self, original_claims: list, claim2checkworthy: dict, claim2queries: dict, claim2verifications: dict
     ) -> list[ClaimDetail]:
         claim_details = []
-        for i, (claim, origin) in enumerate(claim2doc.items()):
+        
+        for i, claim in enumerate(original_claims):
+            # Kiểm tra xem claim có được xác minh không (tức là nó có trong `claim2verifications`)
             if claim in claim2verifications:
-                assert claim in claim2queries, f"Claim {claim} not found in claim2queries."
-                assert claim in claim2evidences, f"Claim {claim} not found in claim2evidences."
-
-                evidences = claim2verifications.get(claim, {})
-                labels = list(map(lambda x: x.relationship, evidences))
-                if labels.count("SUPPORTS") + labels.count("REFUTES") == 0:
-                    factuality = "No evidence found."
+                evidences = claim2verifications.get(claim, [])
+                labels = [e.relationship for e in evidences] if evidences else []
+                support_count = labels.count("SUPPORTS")
+                refute_count = labels.count("REFUTES")
+                
+                if support_count + refute_count == 0:
+                    factuality = "No conclusive evidence found."
                 else:
-                    factuality = labels.count("SUPPORTS") / (labels.count("REFUTES") + labels.count("SUPPORTS"))
+                    factuality = support_count / (support_count + refute_count)
 
                 claim_obj = ClaimDetail(
-                    id=i,
-                    claim=claim,
-                    checkworthy=True,
-                    checkworthy_reason=claim2checkworthy.get(claim, "No reason provided, please report issue."),
-                    origin_text=origin["text"],
-                    start=origin["start"],
-                    end=origin["end"],
-                    queries=claim2queries[claim],
-                    evidences=evidences,
-                    factuality=factuality,
+                    id=i + 1, claim=claim, checkworthy=True,
+                    checkworthy_reason=claim2checkworthy.get(claim, "No reason provided."),
+                    origin_text=claim,
+                    start=-1, end=-1, 
+                    queries=claim2queries.get(claim, []), evidences=evidences, factuality=factuality,
                 )
             else:
+                # Đây là các claim không đáng kiểm chứng hoặc không có trong kết quả verify
                 claim_obj = ClaimDetail(
-                    id=i,
-                    claim=claim,
-                    checkworthy=False,
-                    checkworthy_reason=claim2checkworthy.get(claim, "No reason provided, please report issue."),
-                    origin_text=origin["text"],
-                    start=origin["start"],
-                    end=origin["end"],
-                    queries=[],
-                    evidences=[],
-                    factuality="Nothing to check.",
+                    id=i + 1, claim=claim, checkworthy=(claim in claim2checkworthy),
+                    checkworthy_reason=claim2checkworthy.get(claim, "Not considered check-worthy."),
+                    origin_text=claim, 
+                    start=-1, end=-1,
+                    queries=[], evidences=[], factuality="Nothing to check.",
                 )
             claim_details.append(claim_obj)
         return claim_details
 
     def _finalize_factcheck(
-        self, raw_text: str, claim_detail: list[ClaimDetail] = None, return_dict: bool = True
-    ) -> FactCheckOutput:
-        verified_claims = list(filter(lambda x: not isinstance(x.factuality, str), claim_detail))
-        num_claims = len(claim_detail)
-        num_checkworthy_claims = len(list(filter(lambda x: x.factuality != "Nothing to check.", claim_detail)))
-        num_verified_claims = len(verified_claims)
-        num_supported_claims = len(list(filter(lambda x: x.factuality == 1, verified_claims)))
-        num_refuted_claims = len(list(filter(lambda x: x.factuality == 0, verified_claims)))
-        num_controversial_claims = num_verified_claims - num_supported_claims - num_refuted_claims
-        factuality = sum(map(lambda x: x.factuality, verified_claims)) / num_verified_claims if num_verified_claims != 0 else 0
+        self, raw_text: str, sag: dict = None, claim_detail: list[ClaimDetail] = None, return_dict: bool = True, summary_override: dict = None
+) -> FactCheckOutput:
 
-        summary = FCSummary(
-            num_claims,
-            num_checkworthy_claims,
-            num_verified_claims,
-            num_supported_claims,
-            num_refuted_claims,
-            num_controversial_claims,
-            factuality,
-        )
+        if summary_override:
+            summary = FCSummary(
+                num_claims=0, num_checkworthy_claims=0, num_verified_claims=0,
+                num_supported_claims=0, num_refuted_claims=0, num_controversial_claims=0,
+                factuality=summary_override.get("message")
+            )
+        else:
+            claim_detail = claim_detail or []
+            verified_claims = [c for c in claim_detail if isinstance(c.factuality, float)]
+            num_claims = len(claim_detail)
+            num_checkworthy_claims = len([c for c in claim_detail if c.factuality != "Nothing to check."])
+            num_verified_claims = len(verified_claims)
+            
+            # --- THAY ĐỔI LOGIC TÍNH TOÁN TẠI ĐÂY ---
+            
+            # Một claim được coi là "hỗ trợ tốt" nếu điểm xác thực của nó từ 75% trở lên.
+            num_supported_claims = len([c for c in verified_claims if c.factuality >= 0.75])
+            
+            # Một claim được coi là "bị bác bỏ/mâu thuẫn" nếu điểm xác thực của nó từ 25% trở xuống.
+            num_refuted_claims = len([c for c in verified_claims if c.factuality <= 0.25])
+            
+            # Một claim được coi là "gây tranh cãi" nếu điểm nằm giữa hai ngưỡng trên.
+            # Logic này linh hoạt hơn: num_verified_claims có thể không bằng tổng 3 loại kia nếu có claim có điểm chính xác 0.25 hoặc 0.75
+            # Do đó, cách tính trực tiếp là tốt nhất.
+            num_controversial_claims = len([c for c in verified_claims if 0.25 < c.factuality < 0.75])
+            
+            # --- KẾT THÚC THAY ĐỔI LOGIC ---
+
+            factuality_sum = sum(c.factuality for c in verified_claims)
+            overall_factuality = factuality_sum / num_verified_claims if num_verified_claims > 0 else "N/A"
+
+            summary = FCSummary(
+                num_claims, num_checkworthy_claims, num_verified_claims,
+                num_supported_claims, num_refuted_claims, num_controversial_claims,
+                factuality=overall_factuality,
+            )
 
         num_tokens = len(self.encoding.encode(raw_text))
+        
         output = FactCheckOutput(
-            raw_text=raw_text,
-            token_count=num_tokens,
-            usage=self._get_usage(),
-            claim_detail=claim_detail,
-            summary=summary,
+            raw_text=raw_text, token_count=num_tokens,
+            usage=self._get_usage(), claim_detail=claim_detail, summary=summary,
         )
-
-        if not output.attribute_check():
-            raise ValueError("Output attribute check failed.")
 
         logger.info(f"== Overall Factuality: {output.summary.factuality}\n")
 
         if return_dict:
-            return asdict(output)
+            output_dict = asdict(output)
+            output_dict['sag'] = sag or {"nodes": [], "edges": []}
+            return output_dict
         else:
             return output

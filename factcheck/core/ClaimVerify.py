@@ -1,6 +1,9 @@
+# ./factcheck/core/ClaimVerify.py
+
 from __future__ import annotations
 
 import json
+import time
 from factcheck.utils.logger import CustomLogger
 from factcheck.utils.data_class import Evidence
 
@@ -9,95 +12,97 @@ logger = CustomLogger(__name__).getlog()
 
 class ClaimVerify:
     def __init__(self, llm_client, prompt):
-        """Initialize the ClaimVerify class
-
-        Args:
-            llm_client (BaseClient): The LLM client used for verifying the factuality of claims.
-            prompt (BasePrompt): The prompt used for verifying the factuality of claims.
-        """
         self.llm_client = llm_client
         self.prompt = prompt
 
     def verify_claims(self, claim_evidences_dict, prompt: str = None) -> dict[str, list[Evidence]]:
-        """Verify the factuality of the claims with respect to the given evidences
-
-        Args:
-            claim_evidences_dict (dict): a dictionary of claims and their corresponding evidences.
-
-        Returns:
-            dict: a dictionary of claims and their relationship to each evidence, including evidence, reasoning, relationship.
         """
+        Verifies the factuality of claims against their corresponding evidences using a batching approach.
+        """
+        return self._batch_verify_claims(claim_evidences_dict, prompt=prompt)
 
-        claim_verifications_dict = self._verify_all_claims(claim_evidences_dict, prompt=prompt)
-
-        return claim_verifications_dict
-
-    def _verify_all_claims(
+    def _batch_verify_claims(
         self,
-        claim_evidences_dict: dict[str, list[str]],
+        claim_evidences_dict: dict[str, list[dict]],
         num_retries=3,
         prompt: str = None,
     ) -> dict[str, list[Evidence]]:
-        """Verify the factuality of the claims with respect to the given evidences
-
-        Args:
-            claim_evidences_dict (dict): a dictionary of claims and their corresponding evidences.
-            num_retries (int, optional): maximum attempts for GPT to verify the factuality of the claims. Defaults to 3.
-
-        Returns:
-            list[dict[str, any]]: a list of relationship results, including evidence, reasoning, relationship.
         """
-        attempts = 0
-        # construct user inputs with respect to each claim and its evidences
-        claim_evidence_list = []
-        messages_list = []
-        for claim, _evidences in claim_evidences_dict.items():
-            for e in _evidences:
-                if prompt is None:
-                    user_input = self.prompt.verify_prompt.format(claim=claim, evidence=e)
-                else:
-                    user_input = prompt.format(claim=claim, evidence=e)
-                claim_evidence_list.append((claim, e))
-                messages_list.append(user_input)
-        factual_results = [None] * len(messages_list)
-
-        while (attempts < num_retries) and (None in factual_results):
-            _messages = [_message for _i, _message in enumerate(messages_list) if factual_results[_i] is None]
-            _indices = [_i for _i, _message in enumerate(messages_list) if factual_results[_i] is None]
-
-            _message_list = self.llm_client.construct_message_list(_messages)
-            _response_list = self.llm_client.multi_call(_message_list)
-            for _response, _index in zip(_response_list, _indices):
-                try:
-                    cleaned_response = _response.strip()
-                    if cleaned_response.startswith("```json"):
-                        cleaned_response = cleaned_response[7:-3].strip()
-                    elif cleaned_response.startswith("```"):
-                        cleaned_response = cleaned_response[3:-3].strip()
-                        
-                    _response_json = json.loads(cleaned_response) 
-                    assert all(k in _response_json for k in ["reasoning", "relationship"])
-                    factual_results[_index] = _response_json
-                except:  # noqa: E722
-                    logger.info(f"Warning: LLM response parse fail, retry {attempts}. Response was: {_response}")
-            attempts += 1
-
-        _template_results = {
-            "reasoning": "[System Warning] Can not identify the factuality of the claim.",
-            "relationship": "IRRELEVANT",
-        }
-
-        # construct the evidence list with the verification results
-        evidences = []
-        for (claim, evidence), verification in zip(claim_evidence_list, factual_results):
-            # if cannot get correct response within num_retries times.
-            if verification is None:
-                verification = _template_results
-            evidences.append(Evidence(claim=claim, **evidence, **verification))
-
-        # aggregate the results from list to dict
+        Verifies claims by batching all evidences for a single claim into one LLM call.
+        """
         claim_verifications_dict = {k: [] for k in claim_evidences_dict.keys()}
-        for e in evidences:
-            claim_verifications_dict[e.claim].append(e)
+        total_claims = len(claim_evidences_dict)
+        
+        for i, (claim, evidences) in enumerate(claim_evidences_dict.items()):
+            logger.info(f"Verifying claim {i+1}/{total_claims}: '{claim[:70]}...' with {len(evidences)} evidences.")
+            
+            if not evidences:
+                continue
+
+            if i > 0:
+                time.sleep(2)
+
+            evidences_for_prompt = []
+            for j, evi in enumerate(evidences):
+                evidences_for_prompt.append({
+                    "id": f"E{j + 1}",
+                    "text": evi.get('text', ''),
+                    "trust_level": evi.get('trust_level', 'unknown')
+                })
+
+            evidences_json_str = json.dumps(evidences_for_prompt, indent=2)
+            
+            # --- START: SỬA LỖI KEYERROR DỨT ĐIỂM ---
+            # Lấy template gốc
+            prompt_template = self.prompt.batch_verify_prompt if prompt is None else prompt
+            
+            # 1. Thay thế placeholder `{claim}` trước
+            prompt_with_claim = prompt_template.replace("{claim}", claim)
+            
+            # 2. Thay thế placeholder `{evidences_json}` sau
+            # Cách này đảm bảo rằng .format() hay .replace() không bị xung đột
+            # với nội dung của chuỗi JSON.
+            user_input = prompt_with_claim.replace("{evidences_json}", evidences_json_str)
+            # --- END: SỬA LỖI KEYERROR DỨT ĐIỂM ---
+            
+            messages = self.llm_client.construct_message_list([user_input])
+            response = self.llm_client.call(messages, num_retries=num_retries)
+            
+            try:
+                cleaned_response = response.strip()
+                if cleaned_response.startswith("```json"):
+                    cleaned_response = cleaned_response[7:-3].strip()
+                elif cleaned_response.startswith("```"):
+                    cleaned_response = cleaned_response[3:-3].strip()
+                
+                response_json = json.loads(cleaned_response)
+                verifications = response_json.get("verifications", [])
+                
+                for verification in verifications:
+                    try:
+                        evidence_id = verification.get("id")
+                        if evidence_id and evidence_id.startswith("E"):
+                            original_evidence_index = int(evidence_id[1:]) - 1
+                            if 0 <= original_evidence_index < len(evidences):
+                                original_evidence = evidences[original_evidence_index]
+                                
+                                final_evidence = Evidence(
+                                    claim=claim,
+                                    text=original_evidence.get('text', ''),
+                                    url=original_evidence.get('url', 'N/A'),
+                                    reasoning=verification.get("reasoning", "[No reasoning provided]"),
+                                    relationship=verification.get("relationship", "IRRELEVANT")
+                                )
+                                claim_verifications_dict[claim].append(final_evidence)
+                    except (ValueError, IndexError) as e:
+                        logger.warning(f"Could not map verification back to original evidence: {verification}. Error: {e}")
+
+            except (json.JSONDecodeError, AttributeError) as e:
+                logger.warning(f"Warning: LLM response parse fail for batch verification. Error: {e}. Response was: {response}")
+                for evi in evidences:
+                    claim_verifications_dict[claim].append(Evidence(
+                        claim=claim, text=evi.get('text', ''), url=evi.get('url', 'N/A'),
+                        reasoning="[System Warning] Failed to parse LLM response.", relationship="IRRELEVANT"
+                    ))
 
         return claim_verifications_dict

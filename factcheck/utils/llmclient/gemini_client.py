@@ -1,13 +1,16 @@
+# ./factcheck/utils/llmclient/gemini_client.py
+
 from langchain_google_genai import ChatGoogleGenerativeAI
 from .base import BaseClient
 import logging
 
 logger = logging.getLogger(__name__)
 
+
 class GeminiClient(BaseClient):
     def __init__(
         self,
-        model: str = "gemini-2.5-flash",  # Sử dụng tên model sạch, không cần "models/"
+        model: str = "gemini-2.5-flash", 
         api_config: dict = None,
         max_requests_per_minute=60,
         request_window=60,
@@ -18,13 +21,11 @@ class GeminiClient(BaseClient):
         if "GEMINI_API_KEY" not in self.api_config or not self.api_config["GEMINI_API_KEY"]:
             raise ValueError("GEMINI_API_KEY not found in api_config. Please check your config file.")
 
-        # Khởi tạo client của LangChain, truyền API key vào trực tiếp
-        # LangChain sẽ tự động xử lý tất cả các vấn đề về endpoint và phiên bản API
         try:
             self.langchain_client = ChatGoogleGenerativeAI(
                 model=self.model,
                 google_api_key=self.api_config["GEMINI_API_KEY"],
-                convert_system_message_to_human=True # Giúp tương thích tốt hơn
+                convert_system_message_to_human=True
             )
         except Exception as e:
             logger.error(f"Failed to initialize LangChain ChatGoogleGenerativeAI: {e}")
@@ -32,10 +33,8 @@ class GeminiClient(BaseClient):
 
     def _call(self, messages: list, **kwargs):
         try:
-            # LangChain's invoke method xử lý các định dạng message khác nhau
             response = self.langchain_client.invoke(messages)
             
-            # Ghi lại token usage từ metadata của LangChain
             if hasattr(response, 'usage_metadata'):
                 self._log_usage(response.usage_metadata)
 
@@ -52,7 +51,6 @@ class GeminiClient(BaseClient):
         prompt_list: list[str],
         system_role: str = "You are a helpful assistant designed to output JSON.",
     ):
-        # Tạo định dạng message mà LangChain hiểu rõ
         messages_list = []
         for prompt in prompt_list:
             messages = [

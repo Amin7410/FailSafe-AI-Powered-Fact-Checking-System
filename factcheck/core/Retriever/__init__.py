@@ -1,9 +1,13 @@
+#  ./factcheck/core/Retriever/__init__.py
+
 from .google_retriever import GoogleEvidenceRetriever
 from .serper_retriever import SerperEvidenceRetriever
+from .hybrid_retriever import HybridRetriever
 
 retriever_map = {
     "google": GoogleEvidenceRetriever,
     "serper": SerperEvidenceRetriever,
+    "hybrid": HybridRetriever,
 }
 
 

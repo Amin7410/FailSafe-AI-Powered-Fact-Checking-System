@@ -1,3 +1,5 @@
+# ./factcheck/utils/prompt/claude_prompt.py
+
 decompose_prompt = """
 Your task is to decompose the text into atomic claims.
 The answer should be a JSON with a single key "claims", with the value of a list of strings, where each string should be a context-independent claim, representing one fact.

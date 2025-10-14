@@ -1,3 +1,5 @@
+# ./factcheck/utils/data_class.pyS
+
 from collections import Counter
 from typing import Dict, List, Any, Optional
 from enum import Enum

@@ -1,3 +1,5 @@
+# ./factcheck/__main__.py
+
 import json
 import argparse
 
@@ -44,7 +46,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="gemini-2.5-flash")
     parser.add_argument("--client", type=str, default="gemini", choices=CLIENTS.keys())
     parser.add_argument("--prompt", type=str, default="gemini_prompt")
-    parser.add_argument("--retriever", type=str, default="serper")
+    parser.add_argument("--retriever", type=str, default="hybrid")
     parser.add_argument("--modal", type=str, default="text")
     parser.add_argument("--input", type=str, default="demo_data/text.txt")
     parser.add_argument("--api_config", type=str, default="factcheck/config/api_config.yaml")

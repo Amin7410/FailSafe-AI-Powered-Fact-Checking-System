@@ -1,5 +1,9 @@
+# ./factcheck/core/Decompose.pyS
+
 from factcheck.utils.logger import CustomLogger
 import nltk
+import json
+import networkx as nx
 
 logger = CustomLogger(__name__).getlog()
 
@@ -14,7 +18,7 @@ class Decompose:
         """
         self.llm_client = llm_client
         self.prompt = prompt
-        self.doc2sent = self._nltk_doc2sent
+        # self.doc2sent = self._nltk_doc2sent
 
     def _nltk_doc2sent(self, text: str):
         """Split the document into sentences using nltk
@@ -30,22 +34,21 @@ class Decompose:
         sentence_list = [s.strip() for s in sentences if len(s.strip()) >= 3]
         return sentence_list
 
-    def getclaims(self, doc: str, num_retries: int = 3, prompt: str = None) -> list[str]:
-        """Use Gemini to decompose a document into claims
+    def create_sag(self, doc: str, num_retries: int = 3) -> dict:
+        """
+        Uses an LLM to decompose a document into a Structured Argumentation Graph (SAG).
 
         Args:
-            doc (str): the document to be decomposed into claims
-            num_retries (int, optional): maximum attempts for Gemini to decompose the document into claims. Defaults to 3.
+            doc (str): The document to be decomposed.
+            num_retries (int): Maximum attempts for the LLM.
 
         Returns:
-            list: a list of claims
+            dict: A dictionary representing the SAG with 'nodes' and 'edges',
+                  or an empty graph if it fails.
         """
-        if prompt is None:
-            user_input = self.prompt.decompose_prompt.format(doc=doc).strip()
-        else:
-            user_input = prompt.format(doc=doc).strip()
+        # Sử dụng prompt mới để tạo SAG
+        user_input = self.prompt.sag_prompt.format(doc=doc).strip()
 
-        claims = None
         messages = self.llm_client.construct_message_list([user_input])
         for i in range(num_retries):
             response = self.llm_client.call(
@@ -54,76 +57,48 @@ class Decompose:
                 seed=42 + i,
             )
             try:
+                # Logic parse JSON an toàn
                 cleaned_response = response.strip()
                 if cleaned_response.startswith("```json"):
                     cleaned_response = cleaned_response[7:-3].strip()
                 elif cleaned_response.startswith("```"):
                     cleaned_response = cleaned_response[3:-3].strip()
+                
+                response_dict = json.loads(cleaned_response)
+                
+                # Kiểm tra cấu trúc của SAG
+                if "nodes" in response_dict and "edges" in response_dict:
+                    logger.info(f"Successfully created SAG with {len(response_dict['nodes'])} nodes and {len(response_dict['edges'])} edges.")
+                    return response_dict
 
-                response_dict = eval(cleaned_response)
-                claims = response_dict.get("claims") 
+            except (json.JSONDecodeError, AttributeError, TypeError) as e: 
+                logger.error(f"Parse LLM response for SAG failed. Error: {e}, response: {response}")
+        
+        # Nếu thất bại, trả về một đồ thị rỗng để không làm sập pipeline
+        logger.warning("Failed to create SAG after multiple retries. Returning an empty graph.")
+        return {"nodes": [], "edges": []}
 
-                if isinstance(claims, list) and len(claims) > 0:
-                    break 
-            except Exception as e:
-                logger.error(f"Parse LLM response error {e}, response is: {response}")
-                logger.error(f"Parse LLM response error, prompt is: {messages}")
-        if isinstance(claims, list):
-            return claims
-        else:
-            logger.info("It does not output a list of sentences correctly, return self.doc2sent_tool split results.")
-            claims = self.doc2sent(doc)
-        return claims
-
+    # Giữ lại hàm restore_claims, nhưng nó có thể cần được điều chỉnh sau này
+    # để hoạt động với các node của SAG thay vì list claims.
+    # Hiện tại chúng ta sẽ tạm thời chưa dùng đến nó.
+    
     def restore_claims(self, doc: str, claims: list, num_retries: int = 3, prompt: str = None) -> dict[str, dict]:
-        """Use Gemini to map claims back to the document
-
-        Args:
-            doc (str): the document to be decomposed into claims
-            claims (list[str]): a list of claims to be mapped back to the document
-            num_retries (int, optional): maximum attempts for GPT to decompose the document into claims. Defaults to 3.
-
-        Returns:
-            dict: a dictionary of claims and their corresponding text spans and start/end indices.
+        """
+        Use Gemini to map claims back to the document.
+        This version is more lenient and focuses on getting a mapping,
+        even if it's not a perfect concatenation of the original doc.
         """
 
-        def restore(claim2doc):
-            claim2doc_detail = {}
-            flag = True
-            for claim, sent in claim2doc.items():
-                st = doc.find(sent)
-                if st != -1:
-                    claim2doc_detail[claim] = {"text": sent, "start": st, "end": st + len(sent)}
-                else:
-                    flag = False
-
-            cur_pos = -1
-            texts = []
-            for k, v in claim2doc_detail.items():
-                if v["start"] < cur_pos + 1 and v["end"] > cur_pos:
-                    v["start"] = cur_pos + 1
-                    flag = False
-                elif v["start"] < cur_pos + 1 and v["end"] <= cur_pos:
-                    v["start"] = v["end"]  # temporarily ignore this span
-                    flag = False
-                elif v["start"] > cur_pos + 1:
-                    v["start"] = cur_pos + 1
-                    flag = False
-                v["text"] = doc[v["start"] : v["end"]]
-                texts.append(v["text"])
-                claim2doc_detail[k] = v
-                cur_pos = v["end"]
-
-            return claim2doc_detail, flag
-
+        # --- LOGIC CŨ ĐÃ BỊ XÓA ---
+        # def restore(claim2doc): ...
+        
         if prompt is None:
             user_input = self.prompt.restore_prompt.format(doc=doc, claims=claims).strip()
         else:
             user_input = prompt.format(doc=doc, claims=claims).strip()
 
         messages = self.llm_client.construct_message_list([user_input])
-
-        tmp_restore = {}
+        
         for i in range(num_retries):
             response = self.llm_client.call(
                 messages=messages,
@@ -136,18 +111,53 @@ class Decompose:
                     cleaned_response = cleaned_response[7:-3].strip()
                 elif cleaned_response.startswith("```"):
                     cleaned_response = cleaned_response[3:-3].strip()
-
-                claim2doc = eval(cleaned_response)
                 
-                assert len(claim2doc) == len(claims)
-                claim2doc_detail, flag = restore(claim2doc)
-                if flag:
-                    return claim2doc_detail
-                else:
-                    tmp_restore = claim2doc_detail
-                    raise Exception("Restore claims not satisfied.")
-            except Exception as e:
-                logger.error(f"Parse LLM response error {e}, response is: {response}")
-                logger.error(f"Parse LLM response error, prompt is: {messages}")
+                # Sửa từ eval thành json.loads cho an toàn
+                claim2text = json.loads(cleaned_response)
+                
+                # Kiểm tra cơ bản: có phải dict và có đúng số lượng claims không
+                if isinstance(claim2text, dict) and len(claim2text) == len(claims):
+                    
+                    # Chuyển đổi sang định dạng đầu ra mong muốn
+                    claim2doc_detail = {}
+                    for claim, text_span in claim2text.items():
+                        # Cố gắng tìm vị trí của span trong văn bản gốc
+                        start_index = doc.find(text_span)
+                        if start_index == -1:
+                            # Nếu không tìm thấy, gán vị trí không xác định
+                            start_index = -1 
+                            end_index = -1
+                        else:
+                            end_index = start_index + len(text_span)
+                            
+                        claim2doc_detail[claim] = {
+                            "text": text_span,
+                            "start": start_index,
+                            "end": end_index
+                        }
+                    
+                    logger.info("Successfully restored claims to document spans.")
+                    return claim2doc_detail 
 
-        return tmp_restore
+            except Exception as e:
+                logger.error(f"Parse LLM response error in restore_claims: {e}, response is: {response}")
+                logger.error(f"Prompt was: {messages}")
+
+        # Nếu sau tất cả các lần thử vẫn thất bại, trả về một cấu trúc rỗng
+        # để hệ thống không bị sập
+        logger.warning("Failed to restore claims after multiple retries. Returning empty mapping.")
+        # Tạo mapping rỗng với cấu trúc đúng để tránh lỗi ở các bước sau
+        empty_mapping = {claim: {"text": "", "start": -1, "end": -1} for claim in claims}
+        return empty_mapping
+
+    # Hàm tiện ích để chuyển đổi dict SAG thành đối tượng networkx
+    def to_networkx_graph(self, sag_dict: dict):
+        """Converts the SAG dictionary to a networkx DiGraph object."""
+        G = nx.DiGraph()
+        if "nodes" in sag_dict:
+            for node in sag_dict["nodes"]:
+                G.add_node(node['id'], label=node['label'], type=node['type'])
+        if "edges" in sag_dict:
+            for edge in sag_dict["edges"]:
+                G.add_edge(edge['source'], edge['target'], label=edge['label'])
+        return G

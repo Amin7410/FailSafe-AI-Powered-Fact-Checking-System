@@ -13,3 +13,11 @@ tiktoken
 google-generativeai
 google-ai-generativelanguage
 langchain-google-genai
+Flask-Session
+chromadb
+sentence-transformers
+wikipedia-api
+tqdm
+langchain
+huggingface_hub
+networkx
