@@ -8,7 +8,6 @@ import re
 import bs4
 from factcheck.utils.logger import CustomLogger
 from factcheck.utils.web_util import crawl_web
-# --- IMPORT MỚI ---
 from factcheck.core.Screening import MetadataAnalyzer
 
 logger = CustomLogger(__name__).getlog()
@@ -23,8 +22,8 @@ class SerperEvidenceRetriever:
             raise ValueError("SERPER_API_KEY not found in api_config.")
         self.llm_client = llm_client
         # --- KHỞI TẠO BỘ PHÂN TÍCH ---
-        self.metadata_analyzer = MetadataAnalyzer()
-
+        self.metadata_analyzer = MetadataAnalyzer(llm_client=self.llm_client)
+    
     def retrieve_evidence(self, claim_queries_dict, top_k: int = 3, snippet_extend_flag: bool = True):
         """
         Retrieves and screens evidences for the given claims.

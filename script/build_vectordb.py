@@ -7,21 +7,16 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from tqdm import tqdm
 import sys
 import os
-
+from factcheck.utils.logger import CustomLogger
 # 🔥 Phải đặt trước khi import factcheck
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from factcheck.utils.logger import CustomLogger
-
 
 logger = CustomLogger(__name__).getlog()
 
 # --- CẤU HÌNH ---
 # Danh sách các chủ đề trên Wikipedia để tải về và index
 WIKI_PAGES = [
-    "Pig", "Lemon", "Cancer", "Earth", "Vaccine",
-    "Apollo 11", "Albert Einstein", "World War II",
-    "Photosynthesis", "Artificial intelligence"
+    "Cancer"
 ]
 # Tên của collection trong ChromaDB
 COLLECTION_NAME = "wikipedia_knowledge"
@@ -109,6 +104,17 @@ def build_database():
             metadatas=all_metadatas[i:i + batch_size],
             ids=chunk_ids[i:i + batch_size]
         )
+
+    logger.info("--- Creating Screening Knowledge Collection ---")
+    try:
+        # Cố gắng lấy collection, nếu chưa có thì tạo mới
+        screening_collection = client.get_or_create_collection(
+            name="screening_knowledge",
+            embedding_function=sentence_transformer_ef 
+        )
+        logger.info(f"Successfully created or got 'screening_knowledge' collection. Current count: {screening_collection.count()}")
+    except Exception as e:
+        logger.error(f"Could not create/get 'screening_knowledge' collection: {e}")
 
     logger.info("--- Vector DB Build Process Finished! ---")
     logger.info(f"Total chunks indexed: {collection.count()}")

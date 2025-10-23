@@ -65,6 +65,6 @@ class Checkworthy:
         
         if not checkworthy_claims:
             logger.warning("Could not determine checkworthiness from LLM, assuming all claims are checkworthy.")
-            checkworthy_claims = texts
+            checkworthy_claims = []
         
         return checkworthy_claims, claim2checkworthy

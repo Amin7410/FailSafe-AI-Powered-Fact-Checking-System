@@ -31,14 +31,13 @@ def check(args):
     content = modal_normalization(args.modal, args.input)
     res = factcheck.check_text(content)
     print(json.dumps(res, indent=4))
-
     # Save the results to lark (only for local testing)
-    try:
-        from factcheck.utils import lark
+    # try:
+    #     from factcheck.utils import lark
 
-        lark.save_json_to_lark_by_level(res)
-    except:  # noqa
-        pass
+    #     lark.save_json_to_lark_by_level(res)
+    # except:  # noqa
+    #     pass
 
 
 if __name__ == "__main__":

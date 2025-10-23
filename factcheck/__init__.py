@@ -8,15 +8,15 @@ from factcheck.utils.llmclient import CLIENTS, model2client
 from factcheck.utils.prompt import prompt_mapper
 from factcheck.utils.logger import CustomLogger
 from factcheck.utils.api_config import load_api_config
+from .core.Screening import MetadataAnalyzer, StylometryAnalyzer, ScreeningAdvisor
+from .core.Coreference import ReferenceResolver
 from factcheck.utils.data_class import PipelineUsage, FactCheckOutput, ClaimDetail, FCSummary
 from factcheck.core import (
     Decompose,
     Checkworthy,
     QueryGenerator,
     retriever_mapper,
-    ClaimVerify,
-)
-from .core.Screening import MetadataAnalyzer, StylometryAnalyzer
+    ClaimVerify,)
 
 logger = CustomLogger(__name__).getlog()
 
@@ -51,6 +51,7 @@ class FactCheck:
             "claim_verify_model": claim_verify_model,
         }
 
+        self.model_clients = {}
         for key, _model_name in step_models.items():
             _model_name = default_model if _model_name is None else _model_name
             print(f"== Init {key} with model: {_model_name}")
@@ -60,18 +61,19 @@ class FactCheck:
             else:
                 logger.info("== LLMClient is not specified, use default llm client.")
                 LLMClient = model2client(_model_name)
-            setattr(self, key, LLMClient(model=_model_name, api_config=self.api_config))
+            self.model_clients[key] = LLMClient(model=_model_name, api_config=self.api_config)
 
-        self.metadata_analyzer = MetadataAnalyzer()
+        self.metadata_analyzer = MetadataAnalyzer(llm_client=self.model_clients['checkworthy_model'])
         self.stylometry_analyzer = StylometryAnalyzer()
-
-        self.decomposer = Decompose(llm_client=self.decompose_model, prompt=self.prompt)
-        self.checkworthy = Checkworthy(llm_client=self.checkworthy_model, prompt=self.prompt)
-        self.query_generator = QueryGenerator(llm_client=self.query_generator_model, prompt=self.prompt)
+        self.screening_advisor = ScreeningAdvisor()
+        self.reference_resolver = ReferenceResolver() 
+        self.decomposer = Decompose(llm_client=self.model_clients['decompose_model'], prompt=self.prompt)
+        self.checkworthy = Checkworthy(llm_client=self.model_clients['checkworthy_model'], prompt=self.prompt)
+        self.query_generator = QueryGenerator(llm_client=self.model_clients['query_generator_model'], prompt=self.prompt)
         self.evidence_crawler = retriever_mapper(retriever_name=retriever)(
-            llm_client=self.evidence_retrieval_model, api_config=self.api_config
+            llm_client=self.model_clients['evidence_retrieval_model'], api_config=self.api_config
         )
-        self.claimverify = ClaimVerify(llm_client=self.claim_verify_model, prompt=self.prompt)
+        self.claimverify = ClaimVerify(llm_client=self.model_clients['claim_verify_model'], prompt=self.prompt)
         self.attr_list = ["decomposer", "checkworthy", "query_generator", "evidence_crawler", "claimverify"]
         self.num_seed_retries = num_seed_retries
 
@@ -103,6 +105,7 @@ class FactCheck:
                 claim_detail=[],
                 summary_override={"message": warning_message, "status": "SCREENED_OUT"}
             )
+            self.screening_advisor.learn_from_result(raw_text, early_exit_output)
             return True, early_exit_output
 
         analysis_data = {"metadata": metadata_result, "style": style_result}
@@ -111,16 +114,46 @@ class FactCheck:
     def check_text(self, raw_text: str):
         self._reset_usage()
 
+        logger.info("--- Running Layer 0: Rapid Screening ---")
+    
+        advice = self.screening_advisor.get_advice(raw_text)
+        logger.info("Screening Advisor's advice: '%s'", advice)
+
+        # --- QUY TẮC SÀNG LỌC THÔNG MINH HƠN ---
+        # if advice in ['question', 'no_claims']:
+        #     message = f"Based on past experience, this input is likely a '{advice}' and does not contain verifiable claims."
+        #     logger.warning("Cautious Early Exit Triggered: %s", message)
+            
+        #     early_exit_output = self._finalize_factcheck(
+        #         raw_text=raw_text,
+        #         summary_override={"message": message, "status": "SCREENED_OUT"}
+        #     )
+            
+        #     self.screening_advisor.learn_from_result(raw_text, early_exit_output)
+        #     return early_exit_output
+
         should_exit, screen_result = self._screen_input(raw_text)
         if should_exit:
             return screen_result
 
         logger.info("--- Layer 0 passed. Proceeding with full pipeline. ---")
         st_time = time.time()
-        
+        logger.info("Resolving coreferences to improve context...")
+        resolved_text = self.reference_resolver.resolve(raw_text)
+        if resolved_text != raw_text:
+            logger.info(f"Text resolved. Length changed from {len(raw_text)} to {len(resolved_text)}.")
+            logger.debug(f"Resolved text preview: {resolved_text[:100]}...")
+        else:
+            logger.info("No coreferences needed resolution.")
+        # --- KẾT THÚC BƯỚC MỚI ---
+
         logger.info("Decomposing text into a Structured Argumentation Graph (SAG)...")
-        sag = self.decomposer.create_sag(doc=raw_text, num_retries=self.num_seed_retries)
-        
+        # QUAN TRỌNG: Sử dụng resolved_text thay vì raw_text cho các bước tiếp theo
+        sag = self.decomposer.create_sag(
+            doc=resolved_text, 
+            num_retries=self.num_seed_retries
+        ) 
+                
         ### SỬA ĐỔI 1: Trích xuất claims từ các node có type là "Claim" ###
         claims_from_nodes = [node['label'] for node in sag.get('nodes', []) if node.get('type') == 'Claim']
 
@@ -141,11 +174,12 @@ class FactCheck:
             logger.info("No check-worthy claims found after analysis. Finalizing report.")
             # Chúng ta vẫn cần tạo claim_detail cho các claim không đáng kiểm chứng
             claim_detail = self._merge_claim_details(
-                original_claims=claims_from_nodes, # Dùng list claims gốc
+                original_claims=claims_from_nodes,
                 claim2checkworthy=claim2checkworthy,
                 claim2queries={}, 
                 claim2verifications={}
             )
+            # Dòng này sẽ gọi hàm học hỏi và lưu lại bài học đúng
             return self._finalize_factcheck(raw_text=raw_text, sag=sag, claim_detail=claim_detail, return_dict=True)
         
         logger.info(f"Generating queries for {len(checkworthy_claims)} check-worthy claims...")
@@ -161,14 +195,15 @@ class FactCheck:
         step5_time = time.time()
 
         logger.info(
-            f"== State: Done! \n Total time: {step5_time - st_time:.2f}s. "
-            f"(create claims:{step123_time - st_time:.2f}s ||| "
-            f"retrieve:{step4_time - step123_time:.2f}s ||| "
-            f"verify:{step5_time - step4_time:.2f}s)"
+            "== State: Done! \n Total time: %.2fs. (create claims:%.2fs ||| retrieve:%.2fs ||| verify:%.2fs)",
+            step5_time - st_time,
+            step123_time - st_time,
+            step4_time - step123_time,
+            step5_time - step4_time
         )
 
         claim_detail = self._merge_claim_details(
-            original_claims=claims_from_nodes, # Dùng list claims gốc
+            original_claims=claims_from_nodes,  # Dùng list claims gốc
             claim2checkworthy=claim2checkworthy,
             claim2queries=claim_queries_dict,
             claim2verifications=claim_verifications_dict,
@@ -231,7 +266,7 @@ class FactCheck:
 
     def _finalize_factcheck(
         self, raw_text: str, sag: dict = None, claim_detail: list[ClaimDetail] = None, return_dict: bool = True, summary_override: dict = None
-) -> FactCheckOutput:
+    ) -> FactCheckOutput:
 
         if summary_override:
             summary = FCSummary(
@@ -279,9 +314,15 @@ class FactCheck:
 
         logger.info(f"== Overall Factuality: {output.summary.factuality}\n")
 
+        output_dict = asdict(output)
+        output_dict['sag'] = sag or {"nodes": [], "edges": []}
+
+        self.screening_advisor.learn_from_result(raw_text, output_dict)
+
         if return_dict:
-            output_dict = asdict(output)
-            output_dict['sag'] = sag or {"nodes": [], "edges": []}
-            return output_dict
+            # Đảm bảo trả về dictionary ngay cả khi return_dict=True
+            final_output_dict = asdict(output)
+            final_output_dict['sag'] = sag or {"nodes": [], "edges": []}
+            return final_output_dict
         else:
             return output

@@ -21,3 +21,5 @@ tqdm
 langchain
 huggingface_hub
 networkx
+fastcoref
+datasets
