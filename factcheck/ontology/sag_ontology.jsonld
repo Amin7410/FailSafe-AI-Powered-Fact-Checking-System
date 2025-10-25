@@ -1,0 +1,42 @@
+{
+    "@context": {
+      "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+      "rdfs": "http://www.w3.org/2000/01/rdf-schema#",
+      "owl": "http://www.w3.org/2002/07/owl#",
+      "xsd": "http://www.w3.org/2001/XMLSchema#",
+      "sag": "https://failsafe.factcheck.ai/ontology#",
+
+      "label": { "@id": "rdfs:label" },
+      "comment": { "@id": "rdfs:comment" },
+      "Node": "sag:Node",
+      "Claim": {
+        "@id": "sag:Claim",
+        "rdfs:comment": "A statement that asserts a piece of information which can be verified.",
+        "rdfs:subClassOf": "sag:Node"
+      },
+      "Entity": {
+        "@id": "sag:Entity",
+        "rdfs:comment": "A person, organization, location, or other named entity mentioned in the text.",
+        "rdfs:subClassOf": "sag:Node"
+      },
+      "supports": {
+        "@id": "sag:supports",
+        "@type": "owl:ObjectProperty",
+        "rdfs:comment": "The source node provides evidence or reasoning that supports the target node."
+      },
+      "attacks": {
+        "@id": "sag:attacks",
+        "@type": "owl:ObjectProperty",
+        "rdfs:comment": "The source node provides evidence or reasoning that contradicts the target node."
+      },
+      "explains": {
+        "@id": "sag:explains",
+        "@type": "owl:ObjectProperty",
+        "rdfs:comment": "The source node provides context or explanation for the target node."
+      },
+      "relatedTo": {
+        "@id": "sag:relatedTo",
+        "@type": "owl:ObjectProperty"
+      }
+    }
+}

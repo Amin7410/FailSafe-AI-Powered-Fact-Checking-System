@@ -23,3 +23,9 @@ huggingface_hub
 networkx
 fastcoref
 datasets
+scikit-learn
+numpy
+rdflib
+requests-file
+rdflib-jsonld
+pyld

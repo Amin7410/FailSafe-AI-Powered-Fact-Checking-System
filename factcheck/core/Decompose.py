@@ -4,83 +4,62 @@ from factcheck.utils.logger import CustomLogger
 import nltk
 import json
 import networkx as nx
+from factcheck.utils.graph_utils import sag_to_graph, graph_to_networkx_dict
 
 logger = CustomLogger(__name__).getlog()
 
 
 class Decompose:
     def __init__(self, llm_client, prompt):
-        """Initialize the Decompose class
-
-        Args:
-            llm_client (BaseClient): The LLM client used for decomposing documents into claims.
-            prompt (BasePrompt): The prompt used for fact checking.
-        """
         self.llm_client = llm_client
         self.prompt = prompt
-        # self.doc2sent = self._nltk_doc2sent
-
-    def _nltk_doc2sent(self, text: str):
-        """Split the document into sentences using nltk
-
-        Args:
-            text (str): the document to be split into sentences
-
-        Returns:
-            list: a list of sentences
-        """
-
-        sentences = nltk.sent_tokenize(text)
-        sentence_list = [s.strip() for s in sentences if len(s.strip()) >= 3]
-        return sentence_list
 
     def create_sag(self, doc: str, num_retries: int = 3) -> dict:
-        """
-        Uses an LLM to decompose a document into a Structured Argumentation Graph (SAG).
-
-        Args:
-            doc (str): The document to be decomposed.
-            num_retries (int): Maximum attempts for the LLM.
-
-        Returns:
-            dict: A dictionary representing the SAG with 'nodes' and 'edges',
-                  or an empty graph if it fails.
-        """
-        # Sử dụng prompt mới để tạo SAG
         user_input = self.prompt.sag_prompt.format(doc=doc).strip()
-
         messages = self.llm_client.construct_message_list([user_input])
+
         for i in range(num_retries):
+            # response có thể là str (từ GPT) hoặc dict (từ Gemini)
             response = self.llm_client.call(
                 messages=messages,
                 num_retries=1,
                 seed=42 + i,
             )
             try:
-                # Logic parse JSON an toàn
-                cleaned_response = response.strip()
-                if cleaned_response.startswith("```json"):
-                    cleaned_response = cleaned_response[7:-3].strip()
-                elif cleaned_response.startswith("```"):
-                    cleaned_response = cleaned_response[3:-3].strip()
+                print(f"\n[DEBUG] Raw LLM Response (Attempt {i + 1}):\n{response}\n[END DEBUG]\n")
+
+                response_dict = {}
+                # === SỬA LỖI LOGIC: XỬ LÝ CẢ STR VÀ DICT ===
+                if isinstance(response, dict):
+                    # Nếu đã là dict (từ Gemini), dùng trực tiếp
+                    response_dict = response
+                elif isinstance(response, str):
+                    # Nếu là chuỗi (từ GPT), thì parse nó
+                    cleaned_response = response.strip()
+                    if cleaned_response.startswith("```json"):
+                        cleaned_response = cleaned_response[7:-3].strip()
+                    elif cleaned_response.startswith("```"):
+                        cleaned_response = cleaned_response[3:-3].strip()
+                    response_dict = json.loads(cleaned_response)
+                else:
+                    # Trường hợp không mong muốn
+                    logger.error(f"LLM returned unexpected type: {type(response)}")
+                    continue  # Bỏ qua lần thử này
+                # === KẾT THÚC SỬA LỖI ===
                 
-                response_dict = json.loads(cleaned_response)
-                
-                # Kiểm tra cấu trúc của SAG
-                if "nodes" in response_dict and "edges" in response_dict:
-                    logger.info(f"Successfully created SAG with {len(response_dict['nodes'])} nodes and {len(response_dict['edges'])} edges.")
+                if "@graph" in response_dict:
+                    logger.info(f"Successfully created SAG with {len(response_dict.get('@graph', []))} nodes.")
+                    # Đảm bảo có @context trước khi trả về
+                    if "@context" not in response_dict:
+                        response_dict["@context"] = "https://failsafe.factcheck.ai/ontology#"
                     return response_dict
+                else:
+                    logger.warning(f"Response is valid but missing '@graph' key.")
 
-            except (json.JSONDecodeError, AttributeError, TypeError) as e: 
-                logger.error(f"Parse LLM response for SAG failed. Error: {e}, response: {response}")
-        
-        # Nếu thất bại, trả về một đồ thị rỗng để không làm sập pipeline
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.error(f"Failed to process LLM response for SAG. Error: {e}")     
         logger.warning("Failed to create SAG after multiple retries. Returning an empty graph.")
-        return {"nodes": [], "edges": []}
-
-    # Giữ lại hàm restore_claims, nhưng nó có thể cần được điều chỉnh sau này
-    # để hoạt động với các node của SAG thay vì list claims.
-    # Hiện tại chúng ta sẽ tạm thời chưa dùng đến nó.
+        return {"@context": "https://failsafe.factcheck.ai/ontology#", "@graph": []}
     
     def restore_claims(self, doc: str, claims: list, num_retries: int = 3, prompt: str = None) -> dict[str, dict]:
         """
@@ -151,13 +130,13 @@ class Decompose:
         return empty_mapping
 
     # Hàm tiện ích để chuyển đổi dict SAG thành đối tượng networkx
-    def to_networkx_graph(self, sag_dict: dict):
-        """Converts the SAG dictionary to a networkx DiGraph object."""
-        G = nx.DiGraph()
-        if "nodes" in sag_dict:
-            for node in sag_dict["nodes"]:
-                G.add_node(node['id'], label=node['label'], type=node['type'])
-        if "edges" in sag_dict:
-            for edge in sag_dict["edges"]:
-                G.add_edge(edge['source'], edge['target'], label=edge['label'])
-        return G
+    def to_networkx_graph_dict(self, sag_jsonld: dict) -> dict:
+        """
+        Converts the SAG JSON-LD object to a dictionary format suitable for NetworkX.
+        This now uses the centralized graph utility function.
+        """
+        if not sag_jsonld:
+            return {"nodes": [], "edges": []}
+            
+        graph = sag_to_graph(sag_jsonld)
+        return graph_to_networkx_dict(graph)

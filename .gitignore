@@ -182,7 +182,8 @@ data_map.txt
 dump.rdb
 faiss.index
 
-# test data
+# test and data
 assets/response.json
 flask_session
 chroma_db/
+test/

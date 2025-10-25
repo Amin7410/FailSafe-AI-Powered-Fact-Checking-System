@@ -148,48 +148,44 @@ Output:
 
 
 sag_prompt = """
-Your task is to analyze a given text and convert it into a Structured Argumentation Graph (SAG).
-The graph should be represented as a JSON object with two keys: "nodes" and "edges".
+Your task is to analyze a given text and convert it into a Structured Argumentation Graph (SAG) using the JSON-LD format.
 
-1.  **Nodes**: Identify the core claims and key entities in the text.
-    *   Each node must have a unique `id` (e.g., "N1", "N2"), a `label` (the text content), and a `type` ("Claim" or "Entity").
+The output MUST be a valid JSON object that strictly follows the JSON-LD structure.
+It MUST contain a `@context` key pointing to "https://failsafe.factcheck.ai/ontology#" and a `@graph` key containing an array of nodes.
 
-2.  **Edges**: Identify the relationships between the nodes.
-    *   Each edge must have a `source` (the starting node's id), a `target` (the ending node's id), and a `label` describing the relationship.
-    *   Use relationship labels like: "supports", "attacks", "explains", "related_to".
+1.  **Nodes in `@graph`**: Each node object in the array represents a component of the argument.
+    *   It MUST have an `@id` using a blank node identifier (e.g., "_:N1", "_:N2").
+    *   It MUST have an `@type` which is either "Claim" or "Entity".
+    *   It MUST have a `label` property containing the concise, self-contained text of the node.
 
-**Crucial Rules:**
-- Keep the node labels concise and self-contained.
-- Ensure the graph logically represents the arguments in the text.
+2.  **Relationships (Edges)**: Relationships are defined as properties on the source node. The value of the property is an object with an `@id` key pointing to the target node's blank node identifier.
+    *   Use relationship properties like `supports`, `attacks`, `explains`, `relatedTo`.
 
 --- EXAMPLE ---
 Text: The Sun is a star, not a planet, because it generates its own light through nuclear fusion.
 
 Output:
 {{
-  "nodes": [
+  "@context": "https://failsafe.factcheck.ai/ontology#",
+  "@graph": [
     {{
-      "id": "N1",
-      "label": "The Sun is a star, not a planet.",
-      "type": "Claim"
+      "@id": "_:N1",
+      "@type": "Claim",
+      "label": "The Sun is a star, not a planet."
     }},
     {{
-      "id": "N2",
+      "@id": "_:N2",
+      "@type": "Claim",
       "label": "The Sun generates its own light through nuclear fusion.",
-      "type": "Claim"
-    }}
-  ],
-  "edges": [
-    {{
-      "source": "N2",
-      "target": "N1",
-      "label": "explains"
+      "supports": {{ "@id": "_:N1" }}
     }}
   ]
 }}
 
 --- TASK ---
 Text: {doc}
+
+Your response must contain ONLY the JSON object, without any introductory text, explanations, or markdown formatting.
 Output:
 """
 

@@ -6,6 +6,10 @@ import json
 from factcheck.utils.logger import CustomLogger
 import chromadb
 import uuid
+import math
+from collections import Counter
+import pickle
+import numpy as np
 
 logger = CustomLogger(__name__).getlog()
 # Đường dẫn tới DB, tính từ thư mục gốc của dự án
@@ -128,49 +132,109 @@ class MetadataAnalyzer:
 
 class StylometryAnalyzer:
     """
-    Analyzes the writing style of a text to detect signs of sensationalism,
-    propaganda, or low-quality content.
+    Analyzes the writing style of a text using a combination of rules and statistical models
+    to detect sensationalism, propaganda, or low-quality content.
     """
 
     def __init__(self):
         """
-        Initializes the analyzer with a set of sensational words.
-        This list can be expanded or loaded from a config file.
+        Initializes the analyzer with a set of sensational words and pre-calculated models.
         """
+        # Giữ lại logic cũ
         self.sensational_words = {
             'shocking', 'amazing', 'unbelievable', 'secret', 'exposed', 'bombshell',
             'outrage', 'miracle', 'agenda', 'conspiracy', 'cover-up', 'hoax',
             'scandal', 'mind-blowing', 'must-see', 'breaking', 'urgent', 'warning'
         }
+        
+        # --- TÍCH HỢP THUẬT TOÁN MỚI ---
+        self.idf_vectorizer = None
+        self.entropy_stats = {"mean": 0, "std": 1}  # std=1 để tránh lỗi chia cho 0
+        
+        try:
+            # Tải mô hình IDF đã tính toán trước
+            with open('models/stylometry/idf_vector.pkl', 'rb') as f:
+                self.idf_vectorizer = pickle.load(f)
+            # Tải thông số entropy
+            with open('models/stylometry/entropy_stats.json', 'r') as f:
+                self.entropy_stats = json.load(f)
+            logger.info("StylometryAnalyzer loaded with advanced models (IDF, Entropy).")
+        except FileNotFoundError:
+            logger.warning("Stylometry models not found. StylometryAnalyzer will run in basic mode.")
+
+    def _calculate_entropy(self, text: str):
+        """Tính Shannon Entropy của văn bản dựa trên phân phối từ."""
+        tokens = re.findall(r'\b\w+\b', text.lower())
+        if not tokens:
+            return 0
+        
+        counts = Counter(tokens)
+        total_tokens = len(tokens)
+        probabilities = [count / total_tokens for count in counts.values()]
+        
+        # Thêm một giá trị rất nhỏ để tránh log(0)
+        entropy = -sum(p * math.log2(p + 1e-12) for p in probabilities)
+        return entropy
 
     def analyze(self, text: str):
         """
-        Calculates a 'sensationalism score' based on stylistic features.
+        Calculates a 'sensationalism score' based on multiple stylistic features.
         """
         if not text or not isinstance(text, str):
             return {"sensationalism_score": 0.0, "reason": "Input text is empty or invalid."}
 
+        # --- 1. TÍNH TOÁN CÁC CHỈ SỐ CŨ ---
         num_alpha_chars = sum(1 for c in text if c.isalpha())
         if num_alpha_chars == 0:
             return {"sensationalism_score": 0.0, "reason": "No alphabetic characters to analyze."}
-            
+        
         num_uppers = sum(1 for c in text if c.isupper())
         upper_ratio = num_uppers / num_alpha_chars
-
+        
         words = re.findall(r'\b\w+\b', text.lower())
         num_words = len(words)
-        if num_words == 0:
-            sensational_ratio = 0.0
-        else:
-            sensational_count = sum(1 for word in words if word in self.sensational_words)
-            sensational_ratio = sensational_count / num_words
+        sensational_count = sum(1 for word in words if word in self.sensational_words)
+        sensational_ratio = sensational_count / num_words if num_words > 0 else 0
 
-        score = (upper_ratio * 2.0) + (sensational_ratio * 5.0)
+        # --- 2. TÍNH TOÁN CÁC CHỈ SỐ MỚI ---
+        entropy_score = 0
+        keyword_abuse_score = 0
         
-        reason = (f"Uppercase Ratio: {upper_ratio:.2%} (contributes {upper_ratio * 2.0 :.2f} to score). "
-                  f"Sensational Word Ratio: {sensational_ratio:.2%} (contributes {sensational_ratio * 5.0:.2f} to score).")
+        # Chỉ chạy các thuật toán phức tạp nếu có mô hình và văn bản đủ dài
+        if self.idf_vectorizer and num_words > 20:
+            # Tính Entropy Score
+            entropy_value = self._calculate_entropy(text)
+            # Tính Z-score để xem entropy thấp đến mức nào so với chuẩn
+            z_score = (entropy_value - self.entropy_stats['mean']) / self.entropy_stats['std']
+            # Điểm số càng cao nếu entropy càng thấp (z-score càng âm)
+            entropy_score = max(0, -z_score) 
+
+            # Tính TF-IDF Score
+            try:
+                # Chuyển đổi văn bản thành vector TF-IDF
+                tfidf_matrix = self.idf_vectorizer.transform([text])
+                # Lấy điểm trung bình của 5 từ có TF-IDF cao nhất (đặc trưng nhất)
+                # Điểm cao có thể cho thấy sự lạm dụng từ khóa
+                top_tfidf_scores = np.sort(tfidf_matrix.toarray()[0])[-5:]
+                keyword_abuse_score = np.mean(top_tfidf_scores)
+            except Exception as e:
+                logger.warning(f"Error calculating TF-IDF: {e}")
+                keyword_abuse_score = 0
+
+        # --- 3. TỔNG HỢP TẤT CẢ CÁC ĐIỂM ---
+        # Trọng số có thể được tinh chỉnh sau này
+        # Càng nhiều chỉ số, trọng số của các chỉ số cũ càng giảm để cân bằng
+        final_score = (upper_ratio * 1.5) + \
+                      (sensational_ratio * 3.0) + \
+                      (entropy_score * 1.0) + \
+                      (keyword_abuse_score * 0.35)  # TF-IDF có thể dao động lớn, nên trọng số thấp
         
-        return {"sensationalism_score": score, "reason": reason}
+        reason = (f"Sensational Words: {sensational_ratio:.2%}. "
+                  f"Uppercase Ratio: {upper_ratio:.2%}. "
+                  f"Repetitiveness (Low Entropy Score): {entropy_score:.2f}. "
+                  f"Keyword Abuse Score: {keyword_abuse_score:.2f}.")
+        
+        return {"sensationalism_score": final_score, "reason": reason}
     
 
 class ScreeningAdvisor:

@@ -11,6 +11,8 @@ from factcheck.utils.api_config import load_api_config
 from .core.Screening import MetadataAnalyzer, StylometryAnalyzer, ScreeningAdvisor
 from .core.Coreference import ReferenceResolver
 from factcheck.utils.data_class import PipelineUsage, FactCheckOutput, ClaimDetail, FCSummary
+# Đảm bảo import này đúng
+from factcheck.utils.graph_utils import sag_to_graph, get_claims_from_graph, graph_to_networkx_dict 
 from factcheck.core import (
     Decompose,
     Checkworthy,
@@ -105,7 +107,7 @@ class FactCheck:
                 claim_detail=[],
                 summary_override={"message": warning_message, "status": "SCREENED_OUT"}
             )
-            self.screening_advisor.learn_from_result(raw_text, early_exit_output)
+            # self.screening_advisor.learn_from_result(raw_text, early_exit_output) # Lỗi ở đây: learn_from_result đã được gọi trong _finalize_factcheck
             return True, early_exit_output
 
         analysis_data = {"metadata": metadata_result, "style": style_result}
@@ -145,26 +147,27 @@ class FactCheck:
             logger.debug(f"Resolved text preview: {resolved_text[:100]}...")
         else:
             logger.info("No coreferences needed resolution.")
-        # --- KẾT THÚC BƯỚC MỚI ---
 
         logger.info("Decomposing text into a Structured Argumentation Graph (SAG)...")
-        # QUAN TRỌNG: Sử dụng resolved_text thay vì raw_text cho các bước tiếp theo
-        sag = self.decomposer.create_sag(
+        sag_jsonld = self.decomposer.create_sag(
             doc=resolved_text, 
             num_retries=self.num_seed_retries
-        ) 
-                
-        ### SỬA ĐỔI 1: Trích xuất claims từ các node có type là "Claim" ###
-        claims_from_nodes = [node['label'] for node in sag.get('nodes', []) if node.get('type') == 'Claim']
+        )
 
+        sag_graph = sag_to_graph(sag_jsonld)
+        extracted_claims_info = get_claims_from_graph(sag_graph)
+        claims_from_nodes = [item['label'] for item in extracted_claims_info]
+        
+        # === SỬA LỖI 1: CHUYỂN ĐỔI SAG SANG ĐỊNH DẠNG DICT ĐỂ TRUYỀN ĐI ===
+        # Các hàm sau này (`_finalize_factcheck`) mong đợi một dict, không phải đối tượng Graph.
+        # Chúng ta nên chuyển đổi nó một lần ở đây và sử dụng lại.
+        sag_dict_for_output = graph_to_networkx_dict(sag_graph)
+        
         if not claims_from_nodes:
             logger.warning("SAG decomposition did not return any verifiable claims. Finalizing report.")
-            # ### SỬA ĐỔI 2: Truyền sag vào finalize để sau này có thể dùng ###
-            return self._finalize_factcheck(raw_text=raw_text, sag=sag, claim_detail=[], return_dict=True)
+            # Truyền sag_dict_for_output thay vì sag_jsonld
+            return self._finalize_factcheck(raw_text=raw_text, sag=sag_dict_for_output, claim_detail=[], return_dict=True)
 
-        ### SỬA ĐỔI 3: Loại bỏ restore_claims song song vì nó không còn phù hợp ###
-        # Thay vào đó, chúng ta sẽ chạy Checkworthy một cách tuần tự.
-        # Trong tương lai, restore có thể được điều chỉnh để hoạt động với node_id.
         logger.info("Identifying check-worthy claims from SAG nodes...")
         checkworthy_claims, claim2checkworthy = self.checkworthy.identify_checkworthiness(
             claims_from_nodes, num_retries=self.num_seed_retries
@@ -172,15 +175,14 @@ class FactCheck:
 
         if not checkworthy_claims:
             logger.info("No check-worthy claims found after analysis. Finalizing report.")
-            # Chúng ta vẫn cần tạo claim_detail cho các claim không đáng kiểm chứng
             claim_detail = self._merge_claim_details(
                 original_claims=claims_from_nodes,
                 claim2checkworthy=claim2checkworthy,
                 claim2queries={}, 
                 claim2verifications={}
             )
-            # Dòng này sẽ gọi hàm học hỏi và lưu lại bài học đúng
-            return self._finalize_factcheck(raw_text=raw_text, sag=sag, claim_detail=claim_detail, return_dict=True)
+            # Truyền sag_dict_for_output thay vì sag_jsonld
+            return self._finalize_factcheck(raw_text=raw_text, sag=sag_dict_for_output, claim_detail=claim_detail, return_dict=True)
         
         logger.info(f"Generating queries for {len(checkworthy_claims)} check-worthy claims...")
         claim_queries_dict = self.query_generator.generate_query(claims=checkworthy_claims)
@@ -203,14 +205,14 @@ class FactCheck:
         )
 
         claim_detail = self._merge_claim_details(
-            original_claims=claims_from_nodes,  # Dùng list claims gốc
+            original_claims=claims_from_nodes,
             claim2checkworthy=claim2checkworthy,
             claim2queries=claim_queries_dict,
             claim2verifications=claim_verifications_dict,
         )
 
-        # ### SỬA ĐỔI 4: Truyền cả sag và claim_detail vào hàm cuối cùng ###
-        return self._finalize_factcheck(raw_text=raw_text, sag=sag, claim_detail=claim_detail, return_dict=True)
+        # Truyền sag_dict_for_output thay vì sag_jsonld
+        return self._finalize_factcheck(raw_text=raw_text, sag=sag_dict_for_output, claim_detail=claim_detail, return_dict=True)
 
     def _get_usage(self):
         total_usage = {}
@@ -226,14 +228,12 @@ class FactCheck:
             if hasattr(module, 'llm_client'):
                 module.llm_client.reset_usage()
 
-    ### SỬA ĐỔI 5: Cập nhật hàm _merge_claim_details để không phụ thuộc vào `claim2doc` ###
     def _merge_claim_details(
         self, original_claims: list, claim2checkworthy: dict, claim2queries: dict, claim2verifications: dict
     ) -> list[ClaimDetail]:
         claim_details = []
         
         for i, claim in enumerate(original_claims):
-            # Kiểm tra xem claim có được xác minh không (tức là nó có trong `claim2verifications`)
             if claim in claim2verifications:
                 evidences = claim2verifications.get(claim, [])
                 labels = [e.relationship for e in evidences] if evidences else []
@@ -253,7 +253,6 @@ class FactCheck:
                     queries=claim2queries.get(claim, []), evidences=evidences, factuality=factuality,
                 )
             else:
-                # Đây là các claim không đáng kiểm chứng hoặc không có trong kết quả verify
                 claim_obj = ClaimDetail(
                     id=i + 1, claim=claim, checkworthy=(claim in claim2checkworthy),
                     checkworthy_reason=claim2checkworthy.get(claim, "Not considered check-worthy."),
@@ -279,23 +278,11 @@ class FactCheck:
             verified_claims = [c for c in claim_detail if isinstance(c.factuality, float)]
             num_claims = len(claim_detail)
             num_checkworthy_claims = len([c for c in claim_detail if c.factuality != "Nothing to check."])
-            num_verified_claims = len(verified_claims)
-            
-            # --- THAY ĐỔI LOGIC TÍNH TOÁN TẠI ĐÂY ---
-            
-            # Một claim được coi là "hỗ trợ tốt" nếu điểm xác thực của nó từ 75% trở lên.
+            num_verified_claims = len(verified_claims)       
             num_supported_claims = len([c for c in verified_claims if c.factuality >= 0.75])
-            
-            # Một claim được coi là "bị bác bỏ/mâu thuẫn" nếu điểm xác thực của nó từ 25% trở xuống.
             num_refuted_claims = len([c for c in verified_claims if c.factuality <= 0.25])
-            
-            # Một claim được coi là "gây tranh cãi" nếu điểm nằm giữa hai ngưỡng trên.
-            # Logic này linh hoạt hơn: num_verified_claims có thể không bằng tổng 3 loại kia nếu có claim có điểm chính xác 0.25 hoặc 0.75
-            # Do đó, cách tính trực tiếp là tốt nhất.
             num_controversial_claims = len([c for c in verified_claims if 0.25 < c.factuality < 0.75])
             
-            # --- KẾT THÚC THAY ĐỔI LOGIC ---
-
             factuality_sum = sum(c.factuality for c in verified_claims)
             overall_factuality = factuality_sum / num_verified_claims if num_verified_claims > 0 else "N/A"
 
@@ -314,15 +301,19 @@ class FactCheck:
 
         logger.info(f"== Overall Factuality: {output.summary.factuality}\n")
 
+        # === SỬA LỖI 2: TRUYỀN `sag` THAY VÌ TẠO DICT MỚI ===
         output_dict = asdict(output)
+        # `sag` được truyền vào đã là dict rồi
         output_dict['sag'] = sag or {"nodes": [], "edges": []}
 
         self.screening_advisor.learn_from_result(raw_text, output_dict)
 
         if return_dict:
-            # Đảm bảo trả về dictionary ngay cả khi return_dict=True
+            # `asdict(output)` không chứa `sag`, chúng ta phải thêm nó vào.
             final_output_dict = asdict(output)
             final_output_dict['sag'] = sag or {"nodes": [], "edges": []}
             return final_output_dict
         else:
+            # Cần thêm sag vào đối tượng output nếu không trả về dict
+            output.sag = sag or {"nodes": [], "edges": []} 
             return output
