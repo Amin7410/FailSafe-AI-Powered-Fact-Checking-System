@@ -186,4 +186,5 @@ faiss.index
 assets/response.json
 flask_session
 chroma_db/
+data/
 test/
