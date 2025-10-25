@@ -6,3 +6,4 @@ python ./download_nltk.py
 python ./script/build_vectordb.py
 (python ./script/manage_db.py list/reset)
 python ./script/import_mbfc_data.py
+python ./script/build_stylometry_corpus.py
