@@ -5,7 +5,15 @@ import json
 from .base import BaseClient
 from factcheck.utils.logger import CustomLogger
 
+import backoff
+from google.api_core import exceptions
+
 logger = CustomLogger(__name__).getlog()
+
+
+def is_rate_limit_error(e):
+    """Kiểm tra xem exception có phải là lỗi Rate Limit (429) không."""
+    return isinstance(e, exceptions.ResourceExhausted)
 
 
 class GeminiClient(BaseClient):
@@ -13,7 +21,7 @@ class GeminiClient(BaseClient):
         self,
         model: str = "gemini-2.5-flash",  # Nâng cấp lên 1.5-flash để có kết quả tốt hơn
         api_config: dict = None,
-        max_requests_per_minute=60,
+        max_requests_per_minute=8,
         request_window=60,
     ):
         super().__init__(model, api_config, max_requests_per_minute, request_window)
@@ -36,6 +44,12 @@ class GeminiClient(BaseClient):
             logger.error(f"Failed to initialize Google Generative AI client: {e}")
             raise
 
+    @backoff.on_exception(
+        backoff.expo,
+        exceptions.ResourceExhausted,  # Chỉ retry khi gặp lỗi này
+        max_tries=5,  # Thử lại tối đa 5 lần
+        max_time=120  # Ngừng thử lại sau 120 giây
+    )
     def _call(self, messages: list, **kwargs):
         try:
             full_prompt = "\n".join([msg['content'] for msg in messages])

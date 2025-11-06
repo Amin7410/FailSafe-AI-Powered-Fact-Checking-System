@@ -1,4 +1,4 @@
-# ./factcheck/core/ClaimVerify.py
+# ./factcheck/core/ClaimVerify.py (PHIÊN BẢN GỠ LỖI)
 
 from __future__ import annotations
 
@@ -16,93 +16,91 @@ class ClaimVerify:
         self.prompt = prompt
 
     def verify_claims(self, claim_evidences_dict, prompt: str = None) -> dict[str, list[Evidence]]:
-        """
-        Verifies the factuality of claims against their corresponding evidences using a batching approach.
-        """
-        return self._batch_verify_claims(claim_evidences_dict, prompt=prompt)
+        claims_to_verify = [claim for claim, evidences in claim_evidences_dict.items() if evidences]
+        if not claims_to_verify:
+            return {k: [] for k in claim_evidences_dict.keys()}
 
-    def _batch_verify_claims(
-        self,
-        claim_evidences_dict: dict[str, list[dict]],
-        num_retries=3,
-        prompt: str = None,
-    ) -> dict[str, list[Evidence]]:
-        """
-        Verifies claims by batching all evidences for a single claim into one LLM call.
-        """
-        claim_verifications_dict = {k: [] for k in claim_evidences_dict.keys()}
-        total_claims = len(claim_evidences_dict)
-        
-        for i, (claim, evidences) in enumerate(claim_evidences_dict.items()):
-            logger.info(f"Verifying claim {i+1}/{total_claims}: '{claim[:70]}...' with {len(evidences)} evidences.")
+        logger.info(f"Starting PARALLEL verification for {len(claims_to_verify)} claims.")
+
+        prompts_list = []
+        claim_map = {i: claim for i, claim in enumerate(claims_to_verify)}
+
+        for i, claim in enumerate(claims_to_verify):
+            evidences = claim_evidences_dict[claim]
             
-            if not evidences:
-                continue
-
-            if i > 0:
-                time.sleep(2)
-
-            evidences_for_prompt = []
-            for j, evi in enumerate(evidences):
-                evidences_for_prompt.append({
-                    "id": f"E{j + 1}",
-                    "text": evi.get('text', ''),
-                    "trust_level": evi.get('trust_level', 'unknown')
-                })
-
+            evidences_for_prompt = [{"id": f"E{j + 1}", "text": evi.get('text', ''), "trust_level": evi.get('trust_level', 'unknown')} for j, evi in enumerate(evidences)]
             evidences_json_str = json.dumps(evidences_for_prompt, indent=2)
             
-            # --- START: SỬA LỖI KEYERROR DỨT ĐIỂM ---
-            # Lấy template gốc
             prompt_template = self.prompt.batch_verify_prompt if prompt is None else prompt
-            
-            # 1. Thay thế placeholder `{claim}` trước
             prompt_with_claim = prompt_template.replace("{claim}", claim)
-            
-            # 2. Thay thế placeholder `{evidences_json}` sau
-            # Cách này đảm bảo rằng .format() hay .replace() không bị xung đột
-            # với nội dung của chuỗi JSON.
             user_input = prompt_with_claim.replace("{evidences_json}", evidences_json_str)
-            # --- END: SỬA LỖI KEYERROR DỨT ĐIỂM ---
             
-            messages = self.llm_client.construct_message_list([user_input])
-            response = self.llm_client.call(messages, num_retries=num_retries)
-            
+            prompts_list.append(user_input)
+
+        messages_list = self.llm_client.construct_message_list(prompts_list)
+        
+        logger.info(f"Sending {len(claims_to_verify)} verification requests to LLM concurrently...")
+        responses = self.llm_client.multi_call(messages_list=messages_list, num_retries=3)
+        logger.info("Received all verification responses from LLM.")
+        
+        final_verifications_dict = {k: [] for k in claim_evidences_dict.keys()}
+
+        for i, response in enumerate(responses):
+            claim = claim_map[i]
+            original_evidences = claim_evidences_dict[claim]
+            verified_evidences_for_claim = []
+
+            # === THÊM CAMERA GIÁM SÁT VÀO ĐÂY ===
+            print("\n" + "=" * 20 + " VERIFY DEBUG " + "=" * 20)
+            print(f"Claim: {claim[:80]}...")
+            print(f"Raw LLM Response:\n---\n{response}\n---")
+            # =======================================
+
             try:
-                cleaned_response = response.strip()
-                if cleaned_response.startswith("```json"):
-                    cleaned_response = cleaned_response[7:-3].strip()
-                elif cleaned_response.startswith("```"):
-                    cleaned_response = cleaned_response[3:-3].strip()
-                
-                response_json = json.loads(cleaned_response)
-                verifications = response_json.get("verifications", [])
-                
-                for verification in verifications:
-                    try:
-                        evidence_id = verification.get("id")
-                        if evidence_id and evidence_id.startswith("E"):
-                            original_evidence_index = int(evidence_id[1:]) - 1
-                            if 0 <= original_evidence_index < len(evidences):
-                                original_evidence = evidences[original_evidence_index]
-                                
-                                final_evidence = Evidence(
-                                    claim=claim,
-                                    text=original_evidence.get('text', ''),
-                                    url=original_evidence.get('url', 'N/A'),
-                                    reasoning=verification.get("reasoning", "[No reasoning provided]"),
-                                    relationship=verification.get("relationship", "IRRELEVANT")
-                                )
-                                claim_verifications_dict[claim].append(final_evidence)
-                    except (ValueError, IndexError) as e:
-                        logger.warning(f"Could not map verification back to original evidence: {verification}. Error: {e}")
+                if response:
+                    cleaned_response = response.strip()
+                    if cleaned_response.startswith("```json"):
+                        cleaned_response = cleaned_response[7:-3].strip()
+                    elif cleaned_response.startswith("```"):
+                        cleaned_response = cleaned_response[3:-3].strip()
+                    
+                    response_json = json.loads(cleaned_response)
+                    verifications = response_json.get("verifications", [])
+                    
+                    for verification in verifications:
+                        try:
+                            evidence_id = verification.get("id")
+                            if evidence_id and evidence_id.startswith("E"):
+                                original_evidence_index = int(evidence_id[1:]) - 1
+                                if 0 <= original_evidence_index < len(original_evidences):
+                                    original_evidence = original_evidences[original_evidence_index]
+                                    
+                                    final_evidence = Evidence(
+                                        claim=claim,
+                                        text=original_evidence.get('text', ''),
+                                        url=original_evidence.get('url', 'N/A'),
+                                        reasoning=verification.get("reasoning", "[No reasoning provided]"),
+                                        relationship=verification.get("relationship", "IRRELEVANT")
+                                    )
+                                    verified_evidences_for_claim.append(final_evidence)
+                        except (ValueError, IndexError) as e:
+                            logger.warning(f"Could not map verification for claim '{claim[:50]}...'. Invalid ID: {verification.get('id')}. Error: {e}")
+                else:
+                    logger.warning(f"Received an empty/failed response for verification of claim '{claim[:50]}...'.")
 
             except (json.JSONDecodeError, AttributeError) as e:
-                logger.warning(f"Warning: LLM response parse fail for batch verification. Error: {e}. Response was: {response}")
-                for evi in evidences:
-                    claim_verifications_dict[claim].append(Evidence(
+                # Ghi log chi tiết hơn về lỗi
+                logger.error(f"LLM response PARSE FAIL for claim '{claim[:50]}...'. Error: {e}")
+                logger.error(f"Offending Response was: '{response}'")  # Ghi lại response gây lỗi
+            
+            if not verified_evidences_for_claim:
+                for evi in original_evidences:
+                    verified_evidences_for_claim.append(Evidence(
                         claim=claim, text=evi.get('text', ''), url=evi.get('url', 'N/A'),
-                        reasoning="[System Warning] Failed to parse LLM response.", relationship="IRRELEVANT"
+                        reasoning="[System Warning] Failed to parse or receive LLM verification.", relationship="IRRELEVANT"
                     ))
 
-        return claim_verifications_dict
+            final_verifications_dict[claim] = verified_evidences_for_claim
+        
+        print("=" * 54 + "\n")
+        return final_verifications_dict

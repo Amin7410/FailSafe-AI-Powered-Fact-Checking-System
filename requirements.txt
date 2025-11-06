@@ -29,3 +29,7 @@ rdflib
 requests-file
 rdflib-jsonld
 pyld
+celery
+redis
+PyYAML
+python-dotenv

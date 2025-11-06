@@ -9,6 +9,7 @@ keys = [
     "ANTHROPIC_API_KEY",
     "LOCAL_API_KEY",
     "LOCAL_API_URL",
+    "GEMINI_API_KEY",
 ]
 
 

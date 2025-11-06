@@ -1,6 +1,6 @@
-# ./factcheck/core/QueryGenerator.py
+# ./factcheck/core/QueryGenerator.py (PHIÊN BẢN ĐÃ TỐI ƯU)
 
-import time
+import time  # Vẫn giữ lại để có thể dùng trong tương lai, nhưng không còn sleep(6) nữa
 import json
 from factcheck.utils.logger import CustomLogger
 
@@ -23,65 +23,73 @@ class QueryGenerator:
 
     def generate_query(self, claims: list[str], generating_time: int = 3, prompt: str = None) -> dict[str, list[str]]:
         """
-        Generates search queries for the given claims sequentially to respect API rate limits.
-
-        Args:
-            claims (list[str]): A list of claims to generate questions for.
-            generating_time (int, optional): Maximum retry attempts for the LLM call. Defaults to 3.
-            prompt (str, optional): An alternative prompt template to use. Defaults to None.
-
-        Returns:
-            dict: A dictionary mapping each claim to a list of generated search queries.
+        [TỐI ƯU] Generates search queries for the given claims in parallel.
+        Instead of a sequential loop, it prepares all requests and sends them
+        at once using the LLM client's multi_call feature.
         """
         claim_query_dict = {}
 
         if not claims:
             return {}
 
-        logger.info(f"Starting query generation for {len(claims)} claims.")
+        logger.info(f"Starting PARALLEL query generation for {len(claims)} claims.")
 
-        # --- LOGIC ĐÃ ĐƯỢC THAY THẾ BẰNG VÒNG LẶP TUẦN TỰ ---
-        for i, claim in enumerate(claims):
-            logger.info(f"Generating query for claim {i+1}/{len(claims)}: '{claim[:70]}...'")
+        # --- THAY ĐỔI 1: CHUẨN BỊ TẤT CẢ CÁC PROMPT TRƯỚC ---
+        # Chúng ta không còn ở trong vòng lặp for nữa.
+        # Thay vào đó, chúng ta tạo một danh sách chứa tất cả các prompt cần thiết.
+        
+        prompts_list = []
+        for claim in claims:
+            # Xác định prompt template sẽ sử dụng (logic này không đổi)
+            prompt_template = self.prompt.qgen_prompt if prompt is None else prompt
+            user_input = prompt_template.format(claim=claim)
+            prompts_list.append(user_input)
 
-            # Add a delay between API calls to stay within rate limits (e.g., 10 RPM = 6s/request)
-            # No delay for the first request.
-            if i > 0:
-                time.sleep(6)
-
-            # Determine which prompt to use
-            if prompt is None:
-                user_input = self.prompt.qgen_prompt.format(claim=claim)
-            else:
-                user_input = prompt.format(claim=claim)
-
-            # Construct the message for the LLM
-            messages = self.llm_client.construct_message_list([user_input])
-            
-            # Use the single .call method which has built-in retries
-            response = self.llm_client.call(messages, num_retries=generating_time)
-            
+        # Sử dụng hàm tiện ích của client để chuyển đổi danh sách các chuỗi prompt
+        # thành một danh sách các "messages" theo đúng định dạng mà client yêu cầu.
+        messages_list = self.llm_client.construct_message_list(prompts_list)
+        
+        # --- THAY ĐỔI 2: GỌI SONG SONG MỘT LẦN DUY NHẤT ---
+        # Thay vì gọi `self.llm_client.call()` nhiều lần trong vòng lặp,
+        # chúng ta gọi `self.llm_client.multi_call()` một lần duy nhất.
+        # Hàm này sẽ xử lý việc gửi tất cả các yêu cầu đi song song.
+        
+        logger.info(f"Sending {len(claims)} query generation requests to LLM concurrently...")
+        responses = self.llm_client.multi_call(
+            messages_list=messages_list, 
+            num_retries=generating_time
+        )
+        logger.info("Received all responses from LLM for query generation.")
+        
+        # --- THAY ĐỔI 3: XỬ LÝ KẾT QUẢ SAU KHI ĐÃ CÓ TẤT CẢ ---
+        # `responses` là một danh sách các chuỗi JSON, có thứ tự tương ứng với `claims`.
+        # Chúng ta dùng `zip` để duyệt qua cả hai danh sách này cùng lúc.
+        
+        for claim, response in zip(claims, responses):
             _questions = []
             try:
-                # Safely parse the JSON response from the LLM
-                cleaned_response = response.strip()
-                if cleaned_response.startswith("```json"):
-                    cleaned_response = cleaned_response[7:-3].strip()
-                elif cleaned_response.startswith("```"):
-                    cleaned_response = cleaned_response[3:-3].strip()
-                
-                response_dict = json.loads(cleaned_response)
-                
-                # Use .get() for safety and ensure the result is a list
-                _questions = response_dict.get("Questions", [])
-                if not isinstance(_questions, list):
-                    logger.warning(f"LLM returned non-list for Questions: {_questions}. Defaulting to empty list.")
-                    _questions = []
-            except (json.JSONDecodeError, AttributeError) as e:
-                logger.warning(f"Warning: LLM response parse fail for query generation. Error: {e}. Response was: '{response}'")
+                # Logic để parse từng response không thay đổi.
+                # Thêm kiểm tra `if response:` để xử lý trường hợp API trả về rỗng.
+                if response:
+                    cleaned_response = response.strip()
+                    if cleaned_response.startswith("```json"):
+                        cleaned_response = cleaned_response[7:-3].strip()
+                    elif cleaned_response.startswith("```"):
+                        cleaned_response = cleaned_response[3:-3].strip()
+                    
+                    response_dict = json.loads(cleaned_response)
+                    
+                    _questions = response_dict.get("Questions", [])
+                    if not isinstance(_questions, list):
+                        logger.warning(f"LLM returned non-list for Questions on claim '{claim[:50]}...'. Defaulting to empty list.")
+                        _questions = []
+                else:
+                    logger.warning(f"Received an empty/failed response for claim '{claim[:50]}...'.")
 
-            # Ensure that each claim has at least one query (the claim itself)
-            # and respect the max_query_per_claim limit.
+            except (json.JSONDecodeError, AttributeError) as e:
+                logger.warning(f"Warning: LLM response parse fail for query generation on claim '{claim[:50]}...'. Error: {e}. Response was: '{response}'")
+
+            # Gán kết quả vào dictionary, logic này không đổi.
             claim_query_dict[claim] = [claim] + _questions[:(self.max_query_per_claim - 1)]
 
         logger.info("Finished query generation.")

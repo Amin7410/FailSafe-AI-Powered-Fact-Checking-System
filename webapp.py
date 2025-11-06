@@ -1,14 +1,13 @@
-# ./webapp.py
+# ./webapp.py 
 
-from flask import Flask, request, render_template, jsonify, session
-from factcheck.utils.llmclient import CLIENTS
 import argparse
-import json
 import yaml
-from flask_session import Session 
+from flask import Flask, request, render_template, jsonify, session, redirect, url_for
+from flask_session import Session
+from urllib.parse import urlparse
+from factcheck.utils.config_loader import config
+from tasks import celery_app, run_fact_check_task
 
-from factcheck.utils.utils import load_yaml
-from factcheck import FactCheck
 
 app = Flask(__name__, static_folder="assets")
 
@@ -17,18 +16,16 @@ app.config["SESSION_TYPE"] = "filesystem"
 Session(app)
 
 
-# Define the custom filter
+# --- Các bộ lọc Jinja không đổi ---
 def zip_lists(a, b):
     return zip(a, b)
 
 
-# Register the filter with the Jinja2 environment
 app.jinja_env.filters["zip"] = zip_lists
 
 
-# Occurrences count filter
 def count_occurrences(input_dict, target_string, key):
-    if not isinstance(input_dict, list):
+    if not isinstance(input_dict, list): 
         return 0
     input_list = [item.get(key) for item in input_dict]
     return input_list.count(target_string)
@@ -37,9 +34,8 @@ def count_occurrences(input_dict, target_string, key):
 app.jinja_env.filters["count_occurrences"] = count_occurrences
 
 
-# Filter evidences by relationship
 def filter_evidences(input_dict, target_string, key):
-    if not isinstance(input_dict, list):
+    if not isinstance(input_dict, list): 
         return []
     return [item for item in input_dict if target_string == item.get(key)]
 
@@ -47,83 +43,121 @@ def filter_evidences(input_dict, target_string, key):
 app.jinja_env.filters["filter_evidences"] = filter_evidences
 
 
-# --- CÁC ROUTE ĐÃ ĐƯỢC NÂNG CẤP ---
+def extract_hostname(url):
+    """
+    Một bộ lọc Jinja tùy chỉnh để trích xuất tên miền từ một URL.
+    Ví dụ: 'https://www.example.com/page' -> 'example.com'
+    """
+    if not url or not isinstance(url, str):
+        return ""
+    try:
+        # Sử dụng urlparse để phân tích URL
+        hostname = urlparse(url).hostname
+        # Loại bỏ 'www.' nếu có
+        if hostname and hostname.startswith('www.'):
+            return hostname[4:]
+        return hostname or ""
+    except Exception:
+        return ""  # Trả về chuỗi rỗng nếu có lỗi
+
+# Đăng ký bộ lọc mới với Jinja2
+
+
+app.jinja_env.filters['url_host'] = extract_hostname
+
 
 @app.route("/", methods=["GET", "POST"])
 def index():
     if request.method == "POST":
         response_text = request.form.get("response", "")
         if not response_text.strip():
-            # Nếu người dùng không nhập gì hoặc chỉ nhập khoảng trắng
             return render_template("input.html", error="Please enter some text to check.")
 
-        # Gọi pipeline fact-checking
-        response_data = factcheck_instance.check_text(response_text)
-
-        # THAY ĐỔI QUAN TRỌNG: Lưu kết quả vào session thay vì file
-        # Session sẽ lưu trữ dữ liệu riêng cho từng trình duyệt của người dùng
-        session['factcheck_response'] = response_data
-
-        # Trả về template với dữ liệu vừa nhận được
-        return render_template("FailSafe_fc.html", responses=response_data, shown_claim=0)
+        # THAY ĐỔI LỚN: Không gọi check_text() trực tiếp.
+        # Thay vào đó, đẩy task vào hàng đợi Celery.
+        # .delay() sẽ gửi task đi và trả về một đối tượng task ngay lập tức.
+        task = run_fact_check_task.delay(response_text)
+        
+        # Chuyển hướng người dùng đến một trang loading,
+        # truyền theo task_id để frontend có thể theo dõi.
+        return redirect(url_for('loading_page', task_id=task.id))
 
     # Nếu là GET request, chỉ hiển thị trang nhập liệu
     return render_template("input.html")
 
+# --- THAY ĐỔI 3: Thêm các Route mới để theo dõi và hiển thị kết quả ---
 
+
+@app.route("/loading/<task_id>")
+def loading_page(task_id):
+    """
+    Trang này chỉ hiển thị một spinner và có Javascript để kiểm tra trạng thái.
+    """
+    return render_template("loading.html", task_id=task_id)
+
+
+@app.route('/status/<task_id>')
+def task_status(task_id):
+    task = celery_app.AsyncResult(task_id)
+    
+    if task.state == 'PENDING':
+        response = {'state': task.state, 'status': 'Task is waiting in the queue...'}
+    elif task.state == 'PROGRESS':  # Trạng thái tùy chỉnh của chúng ta
+        response = {
+            'state': task.state,
+            'status': task.info.get('current_step', 'Processing...')
+        }
+    elif task.state == 'SUCCESS':
+        task_result = task.get()
+        session['factcheck_response'] = task_result.get('result')
+        response = {'state': task.state, 'status': 'Complete!'}
+    elif task.state != 'FAILURE':
+        response = {'state': task.state, 'status': 'Starting up...'}
+    else:  # FAILURE
+        response = {
+            'state': task.state,
+            'status': 'An error occurred. Please try again.',
+            'error': str(task.info)
+        }
+    return jsonify(response)
+
+
+@app.route('/final_result')
+def final_result_page():
+    """
+    Khi task hoàn thành, Javascript sẽ chuyển hướng đến đây.
+    Hàm này lấy kết quả từ session và render trang kết quả cuối cùng.
+    """
+    response_data = session.get('factcheck_response', None)
+    if response_data is None:
+        # Xử lý trường hợp người dùng truy cập trực tiếp URL này
+        return redirect(url_for('index'))
+        
+    # Sử dụng template final_result.html (tên cũ là FailSafe_fc.html)
+    return render_template("final_result.html", responses=response_data, shown_claim=0)
+
+
+# Route get_content để xem chi tiết từng claim vẫn giữ nguyên,
+# vì nó đọc dữ liệu từ session.
 @app.route("/shownClaim/<content_id>")
 def get_content(content_id):
-    # THAY ĐỔI QUAN TRỌNG: Lấy dữ liệu từ session của người dùng hiện tại
     response_data = session.get('factcheck_response', None)
-
-    # Xử lý trường hợp không có dữ liệu trong session (ví dụ: session hết hạn,
-    # người dùng truy cập trực tiếp URL này mà chưa submit gì)
     if response_data is None:
         return "Session expired or no data found. Please submit your text again.", 404
-
     try:
-        # Đảm bảo content_id là một số nguyên hợp lệ
         claim_index = int(content_id) - 1
     except (ValueError, TypeError):
-        # Nếu content_id không hợp lệ, trả về lỗi
         return "Invalid claim ID.", 400
-    
-    # Kiểm tra xem index có nằm trong phạm vi hợp lệ không
     num_claims = len(response_data.get('claim_detail', []))
     if not (0 <= claim_index < num_claims):
         claim_index = 0
+    return render_template("final_result.html", responses=response_data, shown_claim=claim_index)
 
-    return render_template("FailSafe_fc.html", responses=response_data, shown_claim=claim_index)
 
-
-# --- PHẦN KHỞI TẠO VÀ CẤU HÌNH GIỮ NGUYÊN ---
-
-parser = argparse.ArgumentParser()
-parser.add_argument("--model", type=str, default="gemini-2.5-flash") 
-parser.add_argument("--client", type=str, default="gemini", choices=CLIENTS.keys())
-parser.add_argument("--prompt", type=str, default="gemini_prompt")
-parser.add_argument("--retriever", type=str, default="hybrid")
-parser.add_argument("--modal", type=str, default="text")
-parser.add_argument("--input", type=str, default="demo_data/text.txt")
-parser.add_argument("--api_config", type=str, default="factcheck/config/api_config.yaml")
-args = parser.parse_args()
-
-# Load API config from yaml file
-try:
-    api_config = load_yaml(args.api_config)
-except FileNotFoundError as e:
-    print(f"API config file not found: {e}")
-    api_config = {}
-except yaml.YAMLError as e:
-    print(f"YAML error loading api config: {e}")
-    api_config = {}
-
-factcheck_instance = FactCheck(
-    default_model=args.model,
-    api_config=api_config,
-    prompt=args.prompt,
-    retriever=args.retriever,
-)
-
+# --- THAY ĐỔI 2: Chạy app từ config ---
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=2024, debug=True)
+    app.run(
+        host=config.get('webapp.host'),
+        port=config.get('webapp.port'),
+        debug=config.get('webapp.debug')
+    )

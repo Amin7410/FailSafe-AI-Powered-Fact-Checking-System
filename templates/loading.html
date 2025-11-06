@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Checking Facts...</title>
+    <!-- Thêm các file CSS của bạn nếu muốn -->
+    <link href="{{ url_for('static', filename='assets/css/vendor.min.css') }}" rel="stylesheet" type="text/css" />
+    <link href="{{ url_for('static', filename='assets/css/app.min.css') }}" rel="stylesheet" type="text/css" />
+    <style>
+        body { display: flex; justify-content: center; align-items: center; height: 100vh; text-align: center; }
+        .spinner-border { width: 3rem; height: 3rem; }
+    </style>
+</head>
+<body>
+    <div>
+        <h1>Analyzing your text...</h1>
+        <p id="status-text">The AI is warming up. This may take a moment.</p>
+        <div class="spinner-border text-primary m-2" role="status">
+            <span class="visually-hidden">Loading...</span>
+        </div>
+        <p><small>You will be redirected automatically when the analysis is complete.</small></p>
+    </div>
+
+    <script>
+        // Hàm để kiểm tra trạng thái của task
+        function checkStatus(taskUrl) {
+            fetch(taskUrl)
+                .then(response => response.json())
+                .then(data => {
+                    // Cập nhật thông báo trạng thái
+                    const statusElement = document.getElementById('status-text');
+                    statusElement.textContent = data.status || 'Processing...';
+
+                    // Nếu task thành công (SUCCESS)
+                    if (data.state === 'SUCCESS') {
+                        // Chuyển hướng đến trang kết quả cuối cùng
+                        window.location.href = `/final_result`;
+                    } 
+                    // Nếu task chưa xong, tiếp tục kiểm tra sau 3 giây
+                    else if (data.state !== 'FAILURE') {
+                        setTimeout(() => {
+                            checkStatus(taskUrl);
+                        }, 3000); // 3 giây
+                    } 
+                    // Nếu task thất bại
+                    else {
+                        statusElement.textContent = "An error occurred: " + data.status;
+                    }
+                })
+                .catch(err => {
+                    console.error("Error checking status:", err);
+                    document.getElementById('status-text').textContent = "Connection error. Could not check status.";
+                });
+        }
+
+        // Bắt đầu quá trình kiểm tra ngay khi trang được tải
+        document.addEventListener('DOMContentLoaded', () => {
+            const taskUrl = `/status/{{ task_id }}`;
+            checkStatus(taskUrl);
+        });
+    </script>
+</body>
+</html>

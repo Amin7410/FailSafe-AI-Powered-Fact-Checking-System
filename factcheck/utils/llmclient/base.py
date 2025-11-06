@@ -1,14 +1,16 @@
 # ./factcheck/utils/llmclient/base.py
-# --- PHIÊN BẢN NÂNG CAO VỚI CACHING TÍCH HỢP ---
 
 import time
 import asyncio
 import json
+import logging
 from abc import abstractmethod
 from functools import partial, lru_cache
 from collections import deque
 
-from ..data_class import TokenUsage
+from data_class import TokenUsage
+
+logger = logging.getLogger(__name__)
 
 
 class BaseClient:
@@ -100,18 +102,36 @@ class BaseClient:
     # Lưu ý: multi_call không được cache ở đây vì nó thường được dùng cho
     # các yêu cầu khác nhau. Việc cache sẽ phức tạp và ít hiệu quả.
     async def _async_call(self, messages: list, **kwargs):
-        """Calls the API asynchronously, tracks traffic, and enforces rate limits."""
-        while len(self.traffic_queue) >= self.max_requests_per_minute:
-            await asyncio.sleep(1)
-            self._expire_old_traffic()
+        """
+        [CẢI TIẾN] Calls the API asynchronously, tracks traffic, and enforces rate limits
+        with a smarter waiting mechanism.
+        """
+        while True:  # Vòng lặp để đảm bảo chắc chắn có một slot trống
+            self._expire_old_traffic()  # Dọn dẹp các request cũ trước
+            
+            if len(self.traffic_queue) < self.max_requests_per_minute:
+                # Nếu còn slot trống, thoát khỏi vòng lặp và tiếp tục
+                break 
+            
+            # Nếu không còn slot, tính toán thời gian chờ đợi thông minh hơn
+            oldest_request_time = self.traffic_queue[0][0]
+            time_to_wait = (oldest_request_time + self.request_window) - time.time()
+            
+            # Chờ cho đến khi slot của request cũ nhất hết hạn
+            # Thêm 0.1s để chắc chắn
+            wait_duration = max(0, time_to_wait) + 0.1
+            logger.debug(f"Rate limit reached. Waiting for {wait_duration:.2f} seconds...")
+            await asyncio.sleep(wait_duration)
 
         loop = asyncio.get_running_loop()
-        # Chuyển đổi messages thành hashable và gọi wrapper đã được cache
         hashable_messages = self._make_hashable(messages)
-        response = await loop.run_in_executor(None, partial(self._cached_call_wrapper, hashable_messages, **kwargs))
         
-        self.total_traffic += self.get_request_length(messages)
+        # Thêm request hiện tại vào hàng đợi NGAY LẬP TỨC để các task khác biết
         self.traffic_queue.append((time.time(), self.get_request_length(messages)))
+        self.total_traffic += self.get_request_length(messages)
+        
+        # Gọi API
+        response = await loop.run_in_executor(None, partial(self._cached_call_wrapper, hashable_messages, **kwargs))
 
         return response
 

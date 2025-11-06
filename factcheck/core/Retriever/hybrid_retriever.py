@@ -4,15 +4,14 @@ import chromadb
 from sentence_transformers import SentenceTransformer
 from .serper_retriever import SerperEvidenceRetriever
 from factcheck.utils.logger import CustomLogger
+from factcheck.utils.config_loader import config
 
 logger = CustomLogger(__name__).getlog()
 
-# --- CẤU HÌNH ---
-COLLECTION_NAME = "wikipedia_knowledge"
-DB_PATH = "./chroma_db"
-EMBEDDING_MODEL_NAME = 'intfloat/e5-base-v2'
-
-VECTOR_SEARCH_DISTANCE_THRESHOLD = 0.2
+COLLECTION_NAME = config.get('vectordb.collection_name')
+DB_PATH = config.get('database.chroma_path')
+EMBEDDING_MODEL_NAME = config.get('vectordb.embedding_model')
+VECTOR_SEARCH_DISTANCE_THRESHOLD = config.get('retriever.hybrid.vector_search_threshold')
 
 
 class HybridRetriever:

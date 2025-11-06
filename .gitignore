@@ -188,3 +188,4 @@ flask_session
 chroma_db/
 data/
 test/
+.env

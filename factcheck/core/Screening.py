@@ -1,4 +1,4 @@
-# factcheck/core/Screening.py
+# factcheck/core/Screening.py (PHIÊN BẢN ĐÃ TỐI ƯU)
 
 import re
 import sqlite3
@@ -10,43 +10,52 @@ import math
 from collections import Counter
 import pickle
 import numpy as np
+from urllib.parse import urlparse  
+from factcheck.utils.config_loader import config
 
 logger = CustomLogger(__name__).getlog()
-# Đường dẫn tới DB, tính từ thư mục gốc của dự án
-SQLITE_DB_PATH = "data/sources.db" 
+
+SQLITE_DB_PATH = config.get('database.sqlite_path')
 
 
 class MetadataAnalyzer:
     """
-    Analyzes the source of the text based on domain names.
-    It checks domains against a local SQLite DB and falls back to an LLM for unknown sources.
+    [TỐI ƯU] Analyzes the source of the text based on domain names.
+    It can now analyze a batch of domains in parallel to reduce latency.
     """
-    def __init__(self, llm_client=None):  # Truyền llm_client vào đây
-        self.domain_regex = r'https?://(?:www\.)?([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
+    def __init__(self, llm_client=None):
+        # self.domain_regex = r'https?://(?:www\.)?([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})' # Regex cũ
         self.llm_client = llm_client
         self.conn = None
-        self.llm_cache = {}
+        self.llm_cache = {}  # Cache để tránh gọi lại API trong cùng một request
         try:
-            # `check_same_thread=False` quan trọng cho Flask khi dùng chung kết nối
             self.conn = sqlite3.connect(SQLITE_DB_PATH, check_same_thread=False)
-            # Giúp truy cập cột bằng tên, ví dụ: result['bias']
             self.conn.row_factory = sqlite3.Row 
             logger.info(f"Successfully connected to sources DB at {SQLITE_DB_PATH}")
         except sqlite3.Error as e:
             logger.error(f"Failed to connect to SQLite DB: {e}. Analyzer will be degraded.")
 
+    def _get_domain_from_url(self, url: str) -> str | None:
+        """Trích xuất domain chính từ một URL đầy đủ."""
+        try:
+            # urlparse sẽ tách URL thành các thành phần
+            parsed_url = urlparse(url)
+            # Lấy netloc (ví dụ: 'www.nytimes.com') và loại bỏ 'www.' nếu có
+            domain = parsed_url.netloc.replace('www.', '')
+            return domain if domain else None
+        except Exception:
+            return None
+
     def _query_local_db(self, domain: str):
         """Truy vấn cơ sở dữ liệu cục bộ."""
-        if not self.conn:
+        if not self.conn or not domain:
             return None
         cursor = self.conn.cursor()
-        # Tối ưu logic tìm kiếm: tìm tên miền chính xác trước
         cursor.execute("SELECT * FROM sources WHERE domain = ?", (domain,))
         result = cursor.fetchone()
         if result:
             return dict(result)
 
-        # Nếu không thấy, thử tìm tên miền cấp cao hơn (ví dụ: tìm 'nytimes.com' cho 'politics.nytimes.com')
         domain_parts = domain.split('.')
         if len(domain_parts) > 2:
             parent_domain = '.'.join(domain_parts[-2:])
@@ -56,39 +65,50 @@ class MetadataAnalyzer:
                 return dict(result)
         return None
 
-    def _evaluate_with_llm(self, domain: str):
-        """Sử dụng LLM làm phương án dự phòng."""
-        if not self.llm_client:
-            logger.warning("LLM client not provided to MetadataAnalyzer. Cannot evaluate new domain.")
-            return None
+    # === HÀM ĐƯỢC NÂNG CẤP ĐỂ XỬ LÝ BATCH ===
+    def _evaluate_domains_with_llm(self, domains: list[str]) -> dict:
+        """Sử dụng LLM để đánh giá một danh sách các domain song song."""
+        if not self.llm_client or not domains:
+            return {}
 
-        logger.info(f"Domain '{domain}' not found in local DB. Querying LLM...")
+        logger.info(f"Querying LLM in parallel for {len(domains)} unknown domains...")
         
-        prompt = f"""
-        Analyze the news website with the domain '{domain}'. 
-        Provide your assessment in a strict JSON object with three keys:
-        1. "name": The common name of the source.
-        2. "bias": Political bias, choose one: "LEFT", "LEFT-CENTER", "CENTER", "RIGHT-CENTER", "RIGHT", "UNKNOWN".
-        3. "credibility": Factual reporting credibility, choose one: "VERY HIGH", "HIGH", "MIXED", "LOW", "VERY LOW", "UNKNOWN".
-
-        Your response must be only the JSON object, without any additional text or markdown formatting.
-        """
-        messages = self.llm_client.construct_message_list([prompt])
-        try:
-            response = self.llm_client.call(messages, num_retries=2)
-            cleaned_response = response.strip()
-            if cleaned_response.startswith("```json"):
-                cleaned_response = cleaned_response[7:-3].strip()
-            elif cleaned_response.startswith("```"):
-                cleaned_response = cleaned_response[3:-3].strip()
-
-            return json.loads(cleaned_response)
-        except Exception as e:
-            logger.error(f"Failed to get or parse LLM response for domain evaluation: {e}")
-            return None
+        # Tạo prompt cho từng domain
+        prompts = []
+        for domain in domains:
+            prompt = f"""
+            Analyze the news website with the domain '{domain}'. 
+            Provide your assessment in a strict JSON object with three keys:
+            1. "name": The common name of the source.
+            2. "bias": Political bias, choose one: "LEFT", "LEFT-CENTER", "CENTER", "RIGHT-CENTER", "RIGHT", "UNKNOWN".
+            3. "credibility": Factual reporting credibility, choose one: "VERY HIGH", "HIGH", "MIXED", "LOW", "VERY LOW", "UNKNOWN".
+            Your response must be only the JSON object, without any additional text or markdown formatting.
+            """
+            prompts.append(prompt)
+        
+        # Gửi tất cả các yêu cầu đi song song
+        messages_list = self.llm_client.construct_message_list(prompts)
+        responses = self.llm_client.multi_call(messages_list, num_retries=2)
+        
+        # Xử lý kết quả trả về
+        evaluations = {}
+        for domain, response in zip(domains, responses):
+            try:
+                if response:
+                    cleaned_response = response.strip()
+                    if cleaned_response.startswith("```json"):
+                        cleaned_response = cleaned_response[7:-3].strip()
+                    elif cleaned_response.startswith("```"):
+                        cleaned_response = cleaned_response[3:-3].strip()
+                    eval_result = json.loads(cleaned_response)
+                    evaluations[domain] = eval_result
+                    self.llm_cache[domain] = eval_result  # Cập nhật cache
+            except Exception as e:
+                logger.error(f"Failed to parse LLM response for domain '{domain}': {e}")
+        
+        return evaluations
             
     def _map_credibility_to_trust_level(self, credibility: str):
-        """Chuyển đổi nhãn của MBFC sang nhãn của hệ thống ('high', 'low', 'neutral')."""
         if not credibility: 
             return "neutral"
         
@@ -97,37 +117,66 @@ class MetadataAnalyzer:
             return "high"
         elif credibility in ["LOW", "VERY LOW"]:
             return "low"
-        else:  # MIXED, UNKNOWN, ...
+        else:
             return "neutral"
 
-    def analyze(self, text: str):
-        """Phân tích văn bản, tìm tên miền và đánh giá."""
-        domains = re.findall(self.domain_regex, text)
-        if not domains:
-            return {"trust_level": "unknown", "reason": "No domain found in text."}
-
-        domain_to_check = domains[0]
-
-        if domain_to_check in self.llm_cache:
-            return self.llm_cache[domain_to_check]
-
-        evaluation = self._query_local_db(domain_to_check)
-        source_of_info = "Local DB"
-
-        if not evaluation:
-            evaluation = self._evaluate_with_llm(domain_to_check)
-            source_of_info = "LLM Fallback"
-
-        if not evaluation:
-            return {"trust_level": "unknown", "reason": f"Could not evaluate domain '{domain_to_check}'."}
+    # === HÀM MỚI ĐỂ ĐIỀU PHỐI XỬ LÝ BATCH ===
+    def analyze_batch(self, urls: list[str]) -> dict[str, dict]:
+        """
+        Phân tích một danh sách các URL, tối ưu hóa việc truy vấn DB và LLM.
+        Returns a dictionary mapping each URL to its trust information.
+        """
+        domains_to_find = {url: self._get_domain_from_url(url) for url in urls if url}
+        unique_domains = set(filter(None, domains_to_find.values()))
         
-        trust_level = self._map_credibility_to_trust_level(evaluation.get('credibility'))
-        reason = (f"Source: '{evaluation.get('name', domain_to_check)}'. "
-                  f"Credibility: {evaluation.get('credibility', 'N/A')}. "
-                  f"Bias: {evaluation.get('bias', 'N/A')}. "
-                  f"(Evaluated by {source_of_info})")
+        domain_evaluations = {}
+        domains_for_llm = []
 
-        return {"trust_level": trust_level, "reason": reason}
+        # 1. Kiểm tra cache và DB cho tất cả các domain
+        for domain in unique_domains:
+            if domain in self.llm_cache:
+                domain_evaluations[domain] = self.llm_cache[domain]
+                continue
+            
+            db_result = self._query_local_db(domain)
+            if db_result:
+                domain_evaluations[domain] = db_result
+            else:
+                domains_for_llm.append(domain)
+        
+        # 2. Gọi LLM một lần duy nhất cho tất cả các domain chưa biết
+        if domains_for_llm:
+            llm_results = self._evaluate_domains_with_llm(domains_for_llm)
+            domain_evaluations.update(llm_results)
+            
+        # 3. Tạo kết quả cuối cùng cho từng URL
+        final_results = {}
+        for url, domain in domains_to_find.items():
+            if not domain or domain not in domain_evaluations:
+                final_results[url] = {"trust_level": "unknown", "reason": f"Could not evaluate domain for URL: {url}"}
+                continue
+
+            evaluation = domain_evaluations[domain]
+            trust_level = self._map_credibility_to_trust_level(evaluation.get('credibility'))
+            reason = (f"Source: '{evaluation.get('name', domain)}'. "
+                      f"Credibility: {evaluation.get('credibility', 'N/A')}. "
+                      f"Bias: {evaluation.get('bias', 'N/A')}.")
+            final_results[url] = {"trust_level": trust_level, "reason": reason}
+            
+        return final_results
+
+    # Giữ lại hàm cũ để tương thích, nhưng nó sẽ kém hiệu quả hơn
+    def analyze(self, text: str):
+        """Phân tích văn bản, tìm URL và đánh giá."""
+        # Sử dụng regex để tìm URL thay vì domain
+        urls = re.findall(r'https?://[^\s/$.?#].[^\s]*', text)
+        if not urls:
+            return {"trust_level": "unknown", "reason": "No URL found in text."}
+        
+        # Chỉ phân tích URL đầu tiên
+        first_url = urls[0]
+        result = self.analyze_batch([first_url])
+        return result.get(first_url, {"trust_level": "unknown", "reason": "Analysis failed."})
 
 
 class StylometryAnalyzer:
@@ -238,9 +287,13 @@ class StylometryAnalyzer:
     
 
 class ScreeningAdvisor:
-    def __init__(self, db_path="./chroma_db", collection_name="screening_knowledge"):
+    def __init__(self, db_path=None, collection_name=None):
+        if db_path is None:
+            db_path = config.get('database.chroma_path')
+        if collection_name is None:
+            collection_name = config.get('vectordb.screening_collection_name')
+        
         self.collection_name = collection_name
-        self.collection = None
         try:
             client = chromadb.PersistentClient(path=db_path)
             self.collection = client.get_collection(name=self.collection_name)
