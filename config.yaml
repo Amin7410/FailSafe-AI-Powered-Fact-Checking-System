@@ -1,40 +1,40 @@
 # config.yaml
-# File cấu hình trung tâm cho dự án FailSafe
 
-# --- Cấu hình Mô hình và API ---
 llm:
-  default_model: "gemini-2.5-flash"   # Đổi về gemini-pro cho ổn định
+  default_model: "gemini-2.5-flash"  
   default_client: "gemini"
   default_prompt: "gemini_prompt"
 
-# --- Cấu hình Pipeline ---
 pipeline:
   retriever: "hybrid"
   coref_model: "f-coref-base"
-  coref_device: null          # null sẽ tự động phát hiện cpu/cuda
-
-# --- Cấu hình Cơ sở dữ liệu ---
+  coref_device: null
+  
 database:
   sqlite_path: "data/sources.db"
-  chroma_path: "./chroma_db"
+  chroma_mode: "local" 
+  chroma_path: "chroma_db"
+  chroma_host: "localhost"
+  chroma_port: 8000
 
-# --- Cấu hình VectorDB & Retriever ---
 vectordb:
   collection_name: "wikipedia_knowledge"
   screening_collection_name: "screening_knowledge"
+  verified_facts_collection_name: "verified_facts"
   embedding_model: "intfloat/e5-base-v2"
   
 retriever:
   hybrid:
     vector_search_threshold: 0.2
+  serper:
+    top_k: 10
 
-# --- Cấu hình WebApp ---
 webapp:
   host: "0.0.0.0"
   port: 2024
   debug: true
+  secret_key: "failsafe_super_secret_key"
 
-# --- Cấu hình Celery ---
 celery:
-  broker_url: "redis://localhost:6379/0"
-  backend_url: "redis://localhost:6379/0"
+  broker_url: "redis://redis:6379/0" 
+  backend_url: "redis://redis:6379/0"

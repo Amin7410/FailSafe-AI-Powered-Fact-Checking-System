@@ -1,14 +1,5 @@
 # .github/workflows/python-lint.yml
 
-# This workflow runs Python linting using flake8 on pull requests to the main or master branch.
-# It checks for code style issues and potential errors.
-# To enable this workflow, ensure that the `flake8` package is included in your project's dependencies.
-# You can customize the Python version and linting rules as needed.
-# For more information, visit:
-# https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
-# https://flake8.pycqa.org/en/latest/
-# https://pre-commit.com/
-
 name: Python Linting
 
 on:

@@ -8,25 +8,18 @@
 	<meta name="description" content="Fact-checking result page for FailSafe AI">
 	<meta name="author" content="FailSafe Team">
 	
-	<!-- ================== BEGIN core-css ================== -->
     <link href="{{ url_for('static', filename='css/vendor.min.css') }}" rel="stylesheet">
     <link href="{{ url_for('static', filename='css/app.min.css') }}" rel="stylesheet">
-	<!-- ================== END core-css ================== -->
-	
-	<!-- ================== BEGIN page-css ================== -->
-    <link href="{{ url_for('static', filename='css/factcheck.css') }}" rel="stylesheet">
-	<!-- ================== END page-css ================== -->
 
-    <!-- START: Cải tiến UI - Thư viện Vis.js cho SAG -->
+    <link href="{{ url_for('static', filename='css/factcheck.css') }}" rel="stylesheet">
+
     <link href="https://unpkg.com/vis-network/styles/vis-network.min.css" rel="stylesheet" type="text/css" />
     <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
-    <!-- END: Cải tiến UI -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body class="theme-gray-100">
 
-	<!-- BEGIN #app -->
 	<div id="app" class="app app-without-sidebar" >
-        <!-- BEGIN #header -->
         <div id="header" class="app-header">
             <div class="brand">
                 <a href="/" class="brand-logo">
@@ -47,16 +40,13 @@
                 </div>
             </div>
         </div>
-		<!-- END #header -->
 
-		<!-- BEGIN #content -->
 		<div id="content" class="app-content" >
 			<ul class="breadcrumb">
 				<li class="breadcrumb-item"><a href="/">Amin</a></li>
 				<li class="breadcrumb-item active">Fact-checking</li>
 			</ul>
             <div class="row">
-                <!-- CỘT BÊN TRÁI: VĂN BẢN GỐC -->
                 <div class="col-xl-4">
                     <div class="card h-100">
                         <div class="card-body">
@@ -75,12 +65,6 @@
                                         {% elif factuality is number %}
                                             {% set span_class = 'controversial-span' %}
                                         {% endif %}
-                                        
-                                        <!-- 
-                                            THAY ĐỔI QUAN TRỌNG:
-                                            Luôn thêm class 'claim-interactive' để đảm bảo có thể click.
-                                            Thêm class 'active' nếu đây là claim đang được hiển thị.
-                                        -->
                                         <span 
                                             class="{{ span_class }} claim-interactive {% if loop.index0 == shown_claim %}active{% endif %}" 
                                             data-claim-index="{{ loop.index }}">
@@ -95,8 +79,17 @@
                     </div>
                 </div>
 
-                <!-- CỘT GIỮA: CHI TIẾT BẰNG CHỨNG -->
                 <div class="col-xl-5">
+                    {% if responses.final_report %}
+                    <div class="card mb-3 border-theme">
+                        <div class="card-header fw-bold bg-light">
+                            <i class="fa fa-file-text me-2"></i> INVESTIGATION REPORT
+                        </div>
+                        <div class="card-body" style="max-height: 400px; overflow-y: auto;">
+                            <div id="final-report-content"></div>
+                        </div>
+                    </div>
+                    {% endif %}
                     {% if responses['claim_detail'] %}
                         {% set active_claim = responses.claim_detail[shown_claim] %}
                         <div class="card h-100">
@@ -106,10 +99,9 @@
                                         <h5 class="card-title">Claim #{{ active_claim.id }}: {{ active_claim.claim }}</h5>
                                         <p class="card-subtitle text-muted">{{ active_claim.checkworthy_reason }}</p>
                                     </div>
-                                    <!-- CẢI TIẾN UI: Biểu đồ tròn cho bằng chứng -->
                                     <div style="height: 80px; width: 80px;">
                                         <canvas id="chart-{{ active_claim.id }}"></canvas>
-                                     </div>
+                                    </div>
                                 </div>
                                 
                                 <ul class="nav nav-pills nav-fill mb-3" id="pills-tab">
@@ -130,7 +122,6 @@
                                     </li>
                                 </ul>
                                 <div class="tab-content" id="pills-tabContent">
-                                    <!-- Tab Bác bỏ (Refutes) -->
                                     <div class="tab-pane fade show active" id="pills-refutes">
                                         {% for evi in active_claim.evidences | filter_evidences("REFUTES", "relationship") %}
                                         <div class="border-start border-danger border-4 ps-3 mb-3">
@@ -142,7 +133,6 @@
                                         <p class="text-center text-muted mt-3">No refuting evidence found.</p>
                                         {% endfor %}
                                     </div>
-                                    <!-- Tab Hỗ trợ (Supports) -->
                                     <div class="tab-pane fade" id="pills-supports">
                                         {% for evi in active_claim.evidences | filter_evidences("SUPPORTS", "relationship") %}
                                         <div class="border-start border-success border-4 ps-3 mb-3">
@@ -154,7 +144,6 @@
                                         <p class="text-center text-muted mt-3">No supporting evidence found.</p>
                                         {% endfor %}
                                     </div>
-                                    <!-- Tab Không liên quan (Irrelevant) -->
                                     <div class="tab-pane fade" id="pills-irrelevant">
                                         {% for evi in active_claim.evidences | filter_evidences("IRRELEVANT", "relationship") %}
                                         <div class="border-start border-secondary border-4 ps-3 mb-3">
@@ -180,13 +169,10 @@
                     {% endif %}
                 </div>
 
-                <!-- CỘT BÊN PHẢI: TỔNG KẾT & SAG -->
                 <div class="col-xl-3">
-                    <!-- Card Tổng kết -->
                     <div class="card">
                         <div class="card-body text-center">
                             <h6 class="card-title text-muted mb-3">OVERALL FACTUALITY</h6>
-                             <!-- CẢI TIẾN UI: Thẻ màu cho kết quả tổng thể -->
                             {% set factuality = responses.summary.factuality %}
                             {% if factuality is number and factuality >= 0.75 %}
                                 <h2 class="text-success mb-0">{{ "%.0f"|format(factuality * 100) }}% <small>Highly Factual</small></h2>
@@ -220,48 +206,35 @@
                             </div>
                         </div>
                     </div>
-                    
-                    <!-- Card SAG -->
+
                     <div class="card mt-3">
                         <div class="card-body">
                             <h5 class="card-title">Argumentation Graph (SAG)</h5>
-                            <!-- Đây là nơi đồ thị sẽ được vẽ -->
                             <div id="sag-network" style="height: 350px; border: 1px solid #dee2e6;"></div>
                         </div>
                     </div>
                 </div>
             </div>
 		</div>
-		<!-- END #content -->
-		
+
 		<a href="#" data-toggle="scroll-to-top" class="btn-scroll-top fade"><i class="fa fa-arrow-up"></i></a>
 	</div>
-	<!-- END #app -->
-	
-	<!-- ================== BEGIN core-js ================== -->
+
 	<script src="{{ url_for('static', filename='js/vendor.min.js') }}"></script>
 	<script src="{{ url_for('static', filename='js/app.min.js') }}"></script>
-	<!-- ================== END core-js ================== -->
-
-    <!-- ================== BEGIN CẢI TIẾN UI - JAVASCRIPT ================== -->
-    <!-- CẢI TIẾN UI: Thêm Chart.js -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
     <script type="text/javascript">
-        // Hàm tiện ích để chuyển đổi URL thành link có thể click
         function convertUrlsToLinks (text) {
           const urlPattern = /(\b(https?|ftp|file):\/\/[-A-Z0-9+&@#\/%?=~_|!:,.;]*[-A-Z0-9+&@#\/%=~_|])/ig;
           return text.replace(urlPattern, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
         }
 
-        // Hàm để chuyển sang xem chi tiết một claim khác
         function switchClaim (id) {
           window.location.href = "/shownClaim/" + id;
         }
 
-        // Chạy các script sau khi trang đã tải xong
         document.addEventListener('DOMContentLoaded', function() {
-            // Thêm sự kiện click cho các claim
             document.querySelectorAll('.claim-interactive').forEach((el) => {
                 el.addEventListener('click', () => {
                 const id = Number(el.getAttribute('data-claim-index'));
@@ -271,11 +244,8 @@
                 });
             });
 
-            // Lấy dữ liệu từ Flask để dùng trong JavaScript
             const allClaimsData = {{ responses.claim_detail | tojson | safe }};
             const sagData = {{ responses.sag | tojson | safe }};
-            
-            // --- Vẽ biểu đồ tròn ---
             const activeClaim = allClaimsData[{{ shown_claim }}];
             if (activeClaim && activeClaim.evidences && activeClaim.evidences.length > 0) {
                 const supportCount = activeClaim.evidences.filter(e => e.relationship === 'SUPPORTS').length;
@@ -302,7 +272,6 @@
                 }
             }
 
-            // --- Vẽ Đồ thị Lập luận (SAG) ---
             if (sagData && sagData.nodes && sagData.nodes.length > 0) {
                 const nodes = new vis.DataSet(sagData.nodes);
                 const mappedEdges = sagData.edges.map(edge => ({
@@ -335,9 +304,13 @@
                 
                 const network = new vis.Network(container, data, options);
             }
+
+            const reportMarkdown = {{ responses.final_report | tojson | safe }};
+            if (reportMarkdown) {
+                document.getElementById('final-report-content').innerHTML = marked.parse(reportMarkdown);
+            }
+
         });
     </script>
-    <!-- ================== END CẢI TIẾN UI - JAVASCRIPT ================== -->
-
 </body>
 </html>

@@ -10,7 +10,6 @@ logger = CustomLogger(__name__).getlog()
 
 
 def voice2text(input, openai_key):
-    # voice to input
     client = OpenAI(api_key=openai_key)
     audio_file = open(input, "rb")
     transcription = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
@@ -18,12 +17,10 @@ def voice2text(input, openai_key):
 
 
 def image2text(input, openai_key):
-    # Function to encode the image
     def encode_image(image_path):
         with open(image_path, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode("utf-8")
 
-    # Getting the base64 string
     base64_image = encode_image(input)
 
     headers = {
@@ -53,7 +50,6 @@ def image2text(input, openai_key):
 
 
 def video2text(input, openai_key):
-    # Read the video and convert it to pictures
     video = cv2.VideoCapture(input)
 
     base64Frames = []
@@ -66,7 +62,6 @@ def video2text(input, openai_key):
 
     video.release()
 
-    # Process the pictures with GPT4-V
     client = OpenAI(api_key=openai_key)
     PROMPT_MESSAGES = [
         {

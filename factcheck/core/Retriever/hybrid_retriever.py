@@ -5,6 +5,8 @@ from sentence_transformers import SentenceTransformer
 from .serper_retriever import SerperEvidenceRetriever
 from factcheck.utils.logger import CustomLogger
 from factcheck.utils.config_loader import config
+from factcheck.utils.database import DatabaseProvider
+import re
 
 logger = CustomLogger(__name__).getlog()
 
@@ -16,17 +18,12 @@ VECTOR_SEARCH_DISTANCE_THRESHOLD = config.get('retriever.hybrid.vector_search_th
 
 class HybridRetriever:
     def __init__(self, llm_client, api_config: dict = None):
-        """
-        Initializes the HybridRetriever.
-        """
         logger.info("Initializing HybridRetriever...")
         self.llm_client = llm_client
-
+        self.collection = None
         try:
             logger.info(f"Loading embedding model '{EMBEDDING_MODEL_NAME}'...")
-            # Không cần tải model ở đây, ChromaDB sẽ tự làm
-            
-            client = chromadb.PersistentClient(path=DB_PATH)
+            client = DatabaseProvider.get_chroma_client()
             
             from chromadb.utils import embedding_functions
             embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
@@ -37,7 +34,6 @@ class HybridRetriever:
                 name=COLLECTION_NAME,
                 embedding_function=embedding_function
             )
-            logger.info(f"Successfully connected to ChromaDB collection '{COLLECTION_NAME}'.")
 
         except Exception as e:
             logger.error(f"Failed to connect to ChromaDB: {e}. Vector search will be disabled.")
@@ -46,12 +42,10 @@ class HybridRetriever:
         self.web_retriever = SerperEvidenceRetriever(llm_client, api_config)
 
     def _search_vector_db(self, query: str, top_k: int = 3) -> list:
-        """Searches the local vector database and filters results by a distance threshold."""
         if not self.collection:
             return []
 
         try:
-            # Truy vấn và yêu cầu trả về cả "distances"
             results = self.collection.query(
                 query_texts=[query],
                 n_results=top_k,
@@ -62,8 +56,6 @@ class HybridRetriever:
             if results and results['ids'] and results['ids'][0]:
                 for i in range(len(results['ids'][0])):
                     distance = results['distances'][0][i]
-                    
-                    # --- BỘ LỌC NGƯỠNG TIN CẬY ---
                     if distance <= VECTOR_SEARCH_DISTANCE_THRESHOLD:
                         evidences.append({
                             "text": results['documents'][0][i],
@@ -84,9 +76,6 @@ class HybridRetriever:
             return []
 
     def retrieve_evidence(self, claim_queries_dict, top_k: int = 3, **kwargs):
-        """
-        Retrieves evidence using a hybrid approach.
-        """
         final_claim_evidence_dict = {}
 
         for claim, queries in claim_queries_dict.items():
@@ -97,12 +86,10 @@ class HybridRetriever:
                 continue
 
             primary_query = queries[0]
-            
-            # --- BƯỚC 1: TÌM TRONG VECTOR DB TRƯỚC ---
+        
             vector_db_evidences = self._search_vector_db(primary_query, top_k=top_k)
             all_evidences_for_claim.extend(vector_db_evidences)
             
-            # --- BƯỚC 2: NẾU CẦN, TÌM THÊM TRÊN WEB ---
             if len(all_evidences_for_claim) < top_k:
                 logger.info(f"Not enough results from Vector DB for claim '{claim[:50]}...'. Falling back to web search.")
                 
@@ -114,8 +101,6 @@ class HybridRetriever:
                 
                 web_evidences = web_evidences_dict.get(claim, [])
                 all_evidences_for_claim.extend(web_evidences)
-
-            # Loại bỏ các bằng chứng trùng lặp (dựa trên URL)
             unique_evidences = {ev['url']: ev for ev in all_evidences_for_claim}.values()
             final_claim_evidence_dict[claim] = list(unique_evidences)
             

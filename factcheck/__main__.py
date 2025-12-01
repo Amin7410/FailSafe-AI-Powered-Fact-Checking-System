@@ -10,14 +10,6 @@ from factcheck import FactCheck
 
 
 def check(args):
-    """factcheck
-
-    Args:
-        model (str): gpt model used for factchecking
-        modal (str): input type, supported types are str, text file, speech, image, and video
-        input (str): input content or path to the file
-    """
-    # Load API config from yaml file
     try:
         api_config = load_yaml(args.api_config)
     except Exception as e:
@@ -31,13 +23,6 @@ def check(args):
     content = modal_normalization(args.modal, args.input)
     res = factcheck.check_text(content)
     print(json.dumps(res, indent=4))
-    # Save the results to lark (only for local testing)
-    # try:
-    #     from factcheck.utils import lark
-
-    #     lark.save_json_to_lark_by_level(res)
-    # except:  # noqa
-    #     pass
 
 
 if __name__ == "__main__":

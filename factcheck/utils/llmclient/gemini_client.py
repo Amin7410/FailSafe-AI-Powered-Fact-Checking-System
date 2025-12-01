@@ -1,72 +1,115 @@
 # ./factcheck/utils/llmclient/gemini_client.py
 
 import google.generativeai as genai
-import json
+import threading
+from itertools import cycle
 from .base import BaseClient
 from factcheck.utils.logger import CustomLogger
-
 import backoff
 from google.api_core import exceptions
+from google.ai.generativelanguage_v1beta.types import content
 
 logger = CustomLogger(__name__).getlog()
 
-
-def is_rate_limit_error(e):
-    """Kiểm tra xem exception có phải là lỗi Rate Limit (429) không."""
-    return isinstance(e, exceptions.ResourceExhausted)
+VERIFICATION_SCHEMA = content.Schema(
+    type=content.Type.OBJECT,
+    properties={
+        "verifications": content.Schema(
+            type=content.Type.ARRAY,
+            items=content.Schema(
+                type=content.Type.OBJECT,
+                properties={
+                    "id": content.Schema(type=content.Type.STRING),
+                    "reasoning": content.Schema(type=content.Type.STRING),
+                    "relationship": content.Schema(
+                        type=content.Type.STRING,
+                        enum=["SUPPORTS", "REFUTES", "IRRELEVANT"] 
+                    ),
+                },
+                required=["id", "reasoning", "relationship"],
+            ),
+        ),
+    },
+    required=["verifications"],
+)
+SCHEMA_MAP = {
+    "verification": VERIFICATION_SCHEMA
+}
 
 
 class GeminiClient(BaseClient):
     def __init__(
         self,
-        model: str = "gemini-2.5-flash",  # Nâng cấp lên 1.5-flash để có kết quả tốt hơn
+        model: str = "gemini-2.5-flash",
         api_config: dict = None,
-        max_requests_per_minute=8,
+        max_requests_per_minute=40, 
         request_window=60,
     ):
         super().__init__(model, api_config, max_requests_per_minute, request_window)
 
-        if "GEMINI_API_KEY" not in self.api_config or not self.api_config["GEMINI_API_KEY"]:
-            raise ValueError("GEMINI_API_KEY not found in api_config.")
+        if "GEMINI_KEY_POOL" in self.api_config and self.api_config["GEMINI_KEY_POOL"]:
+            self.key_pool = self.api_config["GEMINI_KEY_POOL"]
+        elif "GEMINI_API_KEY" in self.api_config and self.api_config["GEMINI_API_KEY"]:
+            self.key_pool = [self.api_config["GEMINI_API_KEY"]]
+        else:
+            raise ValueError("No GEMINI_API_KEYS found in configuration.")
 
-        try:
-            genai.configure(api_key=self.api_config["GEMINI_API_KEY"])
-            # Cấu hình để bật JSON mode
-            self.generation_config = genai.types.GenerationConfig(
-                response_mime_type="application/json"
-            )
-            self.client = genai.GenerativeModel(
-                model_name=self.model,
-                generation_config=self.generation_config
-            )
-            logger.info(f"GeminiClient initialized with model '{self.model}' in JSON mode.")
-        except Exception as e:
-            logger.error(f"Failed to initialize Google Generative AI client: {e}")
-            raise
+        logger.info(f"GeminiClient initialized with {len(self.key_pool)} API keys available.")
+        
+        self.key_cycle = cycle(self.key_pool)
+        
+        self.config_lock = threading.Lock()
+
+        self.default_generation_config = genai.types.GenerationConfig(
+            response_mime_type="application/json"
+        )
+
+    def _get_next_key(self):
+        return next(self.key_cycle)
 
     @backoff.on_exception(
         backoff.expo,
-        exceptions.ResourceExhausted,  # Chỉ retry khi gặp lỗi này
-        max_tries=5,  # Thử lại tối đa 5 lần
-        max_time=120  # Ngừng thử lại sau 120 giây
+        exceptions.ResourceExhausted, 
+        max_tries=5,
+        max_time=120
     )
     def _call(self, messages: list, **kwargs):
+        current_key = self._get_next_key()
+        
+        schema_type = kwargs.get("schema_type")
+        
+        if schema_type and schema_type in SCHEMA_MAP:
+            gen_config = genai.types.GenerationConfig(
+                response_mime_type="application/json",
+                response_schema=SCHEMA_MAP[schema_type]
+            )
+        else:
+            gen_config = self.default_generation_config
+
         try:
             full_prompt = "\n".join([msg['content'] for msg in messages])
-            response = self.client.generate_content(full_prompt)
             
+            response = None
+            with self.config_lock:
+                genai.configure(api_key=current_key)
+                model_instance = genai.GenerativeModel(
+                    model_name=self.model,
+                    generation_config=gen_config 
+                )
+                response = model_instance.generate_content(full_prompt)
+
             if hasattr(response, 'usage_metadata'):
                 self._log_usage(response.usage_metadata)
             
-            # Thêm kiểm tra an toàn
             if not response.parts:
-                logger.warning("Gemini returned an empty response (likely due to safety filters).")
+                logger.warning(f"Gemini (Key ...{current_key[-4:]}) returned empty response.")
                 return "{}"
 
             return response.text
+
         except Exception as e:
-            logger.error(f"Error calling Gemini client: {e}")
-            return "{}"
+            logger.error(f"Error calling Gemini with key ...{current_key[-4:]}: {e}")
+            raise e 
 
     def get_request_length(self, messages):
         return 1
@@ -74,16 +117,12 @@ class GeminiClient(BaseClient):
     def construct_message_list(
         self,
         prompt_list: list[str],
-        # System role không được hỗ trợ trực tiếp như OpenAI, nên ta sẽ ghép nó vào prompt
         system_role: str = "You are a helpful assistant designed to output JSON.",
     ):
         messages_list = []
         for prompt in prompt_list:
-            # Trong Gemini, ta thường kết hợp system role vào user prompt đầu tiên
             full_prompt_content = f"{system_role}\n\n{prompt}"
-            messages = [
-                {"role": "user", "content": full_prompt_content},
-            ]
+            messages = [{"role": "user", "content": full_prompt_content}]
             messages_list.append(messages)
         return messages_list
 
@@ -91,5 +130,5 @@ class GeminiClient(BaseClient):
         try:
             self.usage.prompt_tokens += usage_dict.prompt_token_count
             self.usage.completion_tokens += usage_dict.candidates_token_count
-        except Exception as e:
-            logger.warning(f"Could not log token usage for Gemini: {e}")
+        except Exception:
+            pass

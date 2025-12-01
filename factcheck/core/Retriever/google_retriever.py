@@ -19,8 +19,6 @@ class GoogleEvidenceRetriever(BaseRetriever):
             query = query.replace(" ", "+")
             curr_query_list = all_request_url_dict.get(query, [])
             for page in range(0, self.num_web_pages, 10):
-                # here page is google search's bottom page meaning, click 2 -> start=10
-                # url = "https://www.google.com/search?q={}&start={}".format(query, page)
                 url = "https://www.google.com/search?q={}&lr=lang_{}&hl={}&start={}".format(query, self.lang, self.lang, page)
                 curr_query_list.append(url)
                 all_request_url_dict[query] = curr_query_list
@@ -38,6 +36,5 @@ class GoogleEvidenceRetriever(BaseRetriever):
                 content_list.extend(crawl_google_web(response))
                 crawled_all_page_urls_dict[query] = content_list
         for query, urls in crawled_all_page_urls_dict.items():
-            # urls = sorted(list(set(urls)))
             crawled_all_page_urls_dict[query] = urls[: self.max_search_result_per_query]
         return crawled_all_page_urls_dict

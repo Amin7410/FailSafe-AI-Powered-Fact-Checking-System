@@ -1,4 +1,5 @@
-# Ignore test linting to avoid conflicting changes to version stability.
+# .pre-commit-config.yaml
+
 exclude: |
     (?x)^(
       factcheck/utils/prompt/|

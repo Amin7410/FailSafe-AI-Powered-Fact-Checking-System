@@ -98,16 +98,10 @@
     <script>
         $(document).ready(function(){
             $('#Button').click(function(event){
-                // Prevent the default form submission momentarily
-                // event.preventDefault();
-                
-                // Submit the form
                 $(this).closest('form').submit();
 
-                // Disable the button
                 $(this).prop('disabled', true);
 
-                 // Start an elapsed time timer
                 var timeElapsed = 0;
                 $('#timer').text('Time elapsed: ' + timeElapsed + ' seconds');
                 var timerId = setInterval(function(){

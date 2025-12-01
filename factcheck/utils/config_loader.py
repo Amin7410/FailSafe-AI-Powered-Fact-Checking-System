@@ -3,6 +3,8 @@
 import yaml
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
 
 class ConfigLoader:
     _instance = None
@@ -14,10 +16,7 @@ class ConfigLoader:
 
     def __init__(self, config_path: str = 'config.yaml'):
         if not hasattr(self, 'initialized'):
-            # Lấy đường dẫn tuyệt đối đến thư mục gốc của dự án
-            project_root = Path(__file__).resolve().parent.parent.parent
-            self.config_file = project_root / config_path
-            
+            self.config_file = PROJECT_ROOT / config_path
             try:
                 with open(self.config_file, 'r') as f:
                     self.data = yaml.safe_load(f)
@@ -28,10 +27,6 @@ class ConfigLoader:
                 raise yaml.YAMLError(f"Error parsing YAML file: {e}")
 
     def get(self, key_path: str, default=None):
-        """
-        Lấy giá trị từ cấu hình bằng cách sử dụng chuỗi key có dấu chấm.
-        Ví dụ: 'database.sqlite_path'
-        """
         keys = key_path.split('.')
         value = self.data
         try:
@@ -42,8 +37,6 @@ class ConfigLoader:
             if default is not None:
                 return default
             raise KeyError(f"Config key '{key_path}' not found in {self.config_file}")
-
-# Tạo một instance duy nhất (singleton) để toàn bộ ứng dụng có thể import và sử dụng
 
 
 config = ConfigLoader()

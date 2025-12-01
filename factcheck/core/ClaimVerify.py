@@ -1,9 +1,8 @@
-# ./factcheck/core/ClaimVerify.py (PHIÊN BẢN GỠ LỖI)
+# ./factcheck/core/ClaimVerify.py
 
 from __future__ import annotations
-
 import json
-import time
+from collections import Counter
 from factcheck.utils.logger import CustomLogger
 from factcheck.utils.data_class import Evidence
 
@@ -15,92 +14,101 @@ class ClaimVerify:
         self.llm_client = llm_client
         self.prompt = prompt
 
-    def verify_claims(self, claim_evidences_dict, prompt: str = None) -> dict[str, list[Evidence]]:
+    def verify_claims(self, claim_evidences_dict, batch_size: int = 5) -> dict[str, list[Evidence]]:
         claims_to_verify = [claim for claim, evidences in claim_evidences_dict.items() if evidences]
         if not claims_to_verify:
             return {k: [] for k in claim_evidences_dict.keys()}
-
-        logger.info(f"Starting PARALLEL verification for {len(claims_to_verify)} claims.")
-
-        prompts_list = []
-        claim_map = {i: claim for i, claim in enumerate(claims_to_verify)}
-
-        for i, claim in enumerate(claims_to_verify):
-            evidences = claim_evidences_dict[claim]
-            
-            evidences_for_prompt = [{"id": f"E{j + 1}", "text": evi.get('text', ''), "trust_level": evi.get('trust_level', 'unknown')} for j, evi in enumerate(evidences)]
-            evidences_json_str = json.dumps(evidences_for_prompt, indent=2)
-            
-            prompt_template = self.prompt.batch_verify_prompt if prompt is None else prompt
-            prompt_with_claim = prompt_template.replace("{claim}", claim)
-            user_input = prompt_with_claim.replace("{evidences_json}", evidences_json_str)
-            
-            prompts_list.append(user_input)
-
-        messages_list = self.llm_client.construct_message_list(prompts_list)
         
-        logger.info(f"Sending {len(claims_to_verify)} verification requests to LLM concurrently...")
-        responses = self.llm_client.multi_call(messages_list=messages_list, num_retries=3)
-        logger.info("Received all verification responses from LLM.")
-        
+        logger.info(f"Starting COUNCIL verification for {len(claims_to_verify)} claims.")
         final_verifications_dict = {k: [] for k in claim_evidences_dict.keys()}
-
-        for i, response in enumerate(responses):
-            claim = claim_map[i]
-            original_evidences = claim_evidences_dict[claim]
-            verified_evidences_for_claim = []
-
-            # === THÊM CAMERA GIÁM SÁT VÀO ĐÂY ===
-            print("\n" + "=" * 20 + " VERIFY DEBUG " + "=" * 20)
-            print(f"Claim: {claim[:80]}...")
-            print(f"Raw LLM Response:\n---\n{response}\n---")
-            # =======================================
-
-            try:
-                if response:
-                    cleaned_response = response.strip()
-                    if cleaned_response.startswith("```json"):
-                        cleaned_response = cleaned_response[7:-3].strip()
-                    elif cleaned_response.startswith("```"):
-                        cleaned_response = cleaned_response[3:-3].strip()
-                    
-                    response_json = json.loads(cleaned_response)
-                    verifications = response_json.get("verifications", [])
-                    
-                    for verification in verifications:
-                        try:
-                            evidence_id = verification.get("id")
-                            if evidence_id and evidence_id.startswith("E"):
-                                original_evidence_index = int(evidence_id[1:]) - 1
-                                if 0 <= original_evidence_index < len(original_evidences):
-                                    original_evidence = original_evidences[original_evidence_index]
-                                    
-                                    final_evidence = Evidence(
-                                        claim=claim,
-                                        text=original_evidence.get('text', ''),
-                                        url=original_evidence.get('url', 'N/A'),
-                                        reasoning=verification.get("reasoning", "[No reasoning provided]"),
-                                        relationship=verification.get("relationship", "IRRELEVANT")
-                                    )
-                                    verified_evidences_for_claim.append(final_evidence)
-                        except (ValueError, IndexError) as e:
-                            logger.warning(f"Could not map verification for claim '{claim[:50]}...'. Invalid ID: {verification.get('id')}. Error: {e}")
-                else:
-                    logger.warning(f"Received an empty/failed response for verification of claim '{claim[:50]}...'.")
-
-            except (json.JSONDecodeError, AttributeError) as e:
-                # Ghi log chi tiết hơn về lỗi
-                logger.error(f"LLM response PARSE FAIL for claim '{claim[:50]}...'. Error: {e}")
-                logger.error(f"Offending Response was: '{response}'")  # Ghi lại response gây lỗi
-            
-            if not verified_evidences_for_claim:
-                for evi in original_evidences:
-                    verified_evidences_for_claim.append(Evidence(
-                        claim=claim, text=evi.get('text', ''), url=evi.get('url', 'N/A'),
-                        reasoning="[System Warning] Failed to parse or receive LLM verification.", relationship="IRRELEVANT"
-                    ))
-
-            final_verifications_dict[claim] = verified_evidences_for_claim
         
-        print("=" * 54 + "\n")
+        for i in range(0, len(claims_to_verify), batch_size):
+            batch_claims = claims_to_verify[i : i + batch_size]
+            logger.info(f"Processing verification batch {i//batch_size + 1}: {len(batch_claims)} claims.")
+
+            all_prompts = []
+            meta_map = []  
+            for claim in batch_claims:
+                evidences = claim_evidences_dict[claim]
+                
+                evidences_clean = [
+                    {
+                        "id": f"E{j + 1}", 
+                        "text": evi.get('text', '')[:1000],  
+                        "trust_level": evi.get('trust_level', 'unknown')
+                    } 
+                    for j, evi in enumerate(evidences)
+                ]
+                evidences_json_str = json.dumps(evidences_clean)
+                roles = [
+                    ("Logician", self.prompt.logician_prompt),
+                    ("Researcher", self.prompt.researcher_prompt),
+                    ("Skeptic", self.prompt.skeptic_prompt)
+                ]
+                for role_name, role_template in roles:
+                    user_input = role_template.format(claim=claim, evidences_json=evidences_json_str)
+                    all_prompts.append(user_input)
+                    meta_map.append({"claim": claim, "role": role_name})
+            logger.info(f"Council is debating... Sending {len(all_prompts)} requests.")
+            messages_list = self.llm_client.construct_message_list(all_prompts)
+            
+            responses = self.llm_client.multi_call(
+                messages_list, 
+                num_retries=3,
+                schema_type="verification" 
+            )
+            results_by_claim = {c: {} for c in batch_claims}
+            for idx, response in enumerate(responses):
+                meta = meta_map[idx]
+                claim = meta['claim']
+                role = meta['role']
+                try:
+                    if response:
+                        data = json.loads(response)
+                        verifications = data.get("verifications", [])
+                        
+                        for v in verifications:
+                            e_id = v.get("id")
+                            if not e_id: 
+                                continue
+                            
+                            if e_id not in results_by_claim[claim]:
+                                results_by_claim[claim][e_id] = []
+                            
+                            results_by_claim[claim][e_id].append({
+                                "role": role,
+                                "relationship": v.get("relationship", "IRRELEVANT").upper(),
+                                "reasoning": v.get("reasoning", "No reasoning provided.")
+                            })
+                except Exception as e:
+                    logger.warning(f"Agent {role} failed parse on claim '{claim[:20]}...': {e}")
+
+            for claim in batch_claims:
+                original_evidences = claim_evidences_dict[claim]
+                final_evidence_objs = []
+                
+                for j, evi_orig in enumerate(original_evidences):
+                    e_id = f"E{j + 1}"
+                    opinions = results_by_claim[claim].get(e_id, [])
+                    
+                    if not opinions:
+                        final_obj = Evidence(
+                            claim=claim, text=evi_orig.get('text'), url=evi_orig.get('url'),
+                            reasoning="[System] No AI agents verified this evidence.", relationship="IRRELEVANT"
+                        )
+                    else:
+                        votes = [op['relationship'] for op in opinions]
+                        vote_counts = Counter(votes)
+                        final_relationship = vote_counts.most_common(1)[0][0]
+                        combined_reasoning = " || ".join([f"[{op['role']}]: {op['reasoning']}" for op in opinions])
+                        
+                        final_obj = Evidence(
+                            claim=claim,
+                            text=evi_orig.get('text', ''),
+                            url=evi_orig.get('url', 'N/A'),
+                            relationship=final_relationship,
+                            reasoning=combined_reasoning
+                        )
+                    final_evidence_objs.append(final_obj)
+                final_verifications_dict[claim] = final_evidence_objs
         return final_verifications_dict

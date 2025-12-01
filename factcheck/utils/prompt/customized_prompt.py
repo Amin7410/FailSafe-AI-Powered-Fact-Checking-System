@@ -25,11 +25,9 @@ class CustomizedPrompt(BasePrompt):
             setattr(self, key, self.prompts[key])
 
     def load_prompt_yaml(self, prompt_name):
-        # Load the prompt from a yaml file
         with open(prompt_name, "r") as file:
             return yaml.safe_load(file)
 
     def load_prompt_json(self, prompt_name):
-        # Load the prompt from a json file
         with open(prompt_name, "r") as file:
             return json.load(file)

@@ -34,7 +34,6 @@ class ClaudeClient(BaseClient):
     ):
         if system_role is None:
             Warning("system_role is not used in this case")
-        # system role is not used in this case
         messages_list = list()
         for prompt in prompt_list:
             messages = [

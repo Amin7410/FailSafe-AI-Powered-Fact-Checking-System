@@ -5,24 +5,20 @@ import backoff
 import time
 import bs4
 import asyncio
+import re
+from bs4 import BeautifulSoup
 from httpx import AsyncHTTPTransport
 from httpx._client import AsyncClient
+from factcheck.utils.logger import CustomLogger
 
+logger = CustomLogger(__name__).getlog()
 
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.14; rv:65.0) Gecko/20100101 Firefox/65.0"
-# mobile user-agent
 MOBILE_USER_AGENT = "Mozilla/5.0 (Linux; Android 7.0; SM-G930V Build/NRD90M) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/59.0.3071.125 Mobile Safari/537.36"
 headers = {"User-Agent": USER_AGENT}
 
 
 def is_tag_visible(element: bs4.element) -> bool:
-    """Determines if an HTML element is visible.
-
-    Args:
-        element: A BeautifulSoup element to check the visibility of.
-    returns:
-        Whether the element is visible.
-    """
     if element.parent.name in [
         "style",
         "script",
@@ -68,7 +64,6 @@ def crawl_web(query_url_dict: dict):
     return responses
 
 
-# @backoff.on_exception(backoff.expo, (requests.exceptions.RequestException, requests.exceptions.Timeout), max_tries=1,max_time=3)
 def common_web_request(url: str, query: str = None, timeout: int = 3):
     resp = requests.get(url, headers=headers, timeout=timeout)
     if query:
@@ -83,55 +78,41 @@ def parse_response(response: requests.Response, url: str, query: str = None):
     try:
         soup = bs4.BeautifulSoup(html_content, "html.parser")
         texts = soup.findAll(text=True)
-        # Filter out invisible text from the page.
         visible_text = filter(is_tag_visible, texts)
     except Exception as _:  # noqa: F841
         return None, url, query
 
-    # Returns all the text concatenated as a string.
     web_text = " ".join(t.strip() for t in visible_text).strip()
-    # Clean up spacing.
+
     web_text = " ".join(web_text.split())
     return web_text, url, query
 
 
 def scrape_url(url: str, timeout: float = 3):
-    """Scrapes a URL for all text information.
 
-    Args:
-        url: URL of webpage to scrape.
-        timeout: Timeout of the requests call.
-    Returns:
-        web_text: The visible text of the scraped URL.
-        url: URL input.
-    """
-    # Scrape the URL
     try:
         response = requests.get(url, timeout=timeout)
         response.raise_for_status()
     except requests.exceptions.RequestException as _:  # noqa: F841
         return None, url
 
-    # Extract out all text from the tags
     try:
         soup = bs4.BeautifulSoup(response.text, "html.parser")
         texts = soup.findAll(text=True)
-        # Filter out invisible text from the page.
+
         visible_text = filter(is_tag_visible, texts)
     except Exception as _:  # noqa: F841
         return None, url
 
-    # Returns all the text concatenated as a string.
     web_text = " ".join(t.strip() for t in visible_text).strip()
-    # Clean up spacing.
+
     web_text = " ".join(web_text.split())
     return web_text, url
 
 
 def crawl_google_web(response, top_k: int = 10):
     soup = bs4.BeautifulSoup(response.text, "html.parser")
-    # with open("text%d.html"%time.time(), 'w') as fw:
-    #     fw.write(response.text)
+
     valid_node_list = list()
     for node in soup.find_all("a", {"href": True}):
         if node.findChildren("h3"):
@@ -139,5 +120,46 @@ def crawl_google_web(response, top_k: int = 10):
     result_urls = list()
     for node in valid_node_list:
         result_urls.append(node.get("href"))
-    # result_urls = [link.get("href") for link in node if link.get("href")]
     return result_urls[:top_k]
+
+
+def is_url(text):
+    url_pattern = re.compile(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+')
+    return re.match(url_pattern, text) is not None
+
+
+def scrape_url_content(url):
+    logger.info(f"--- Starting URL scrape process: {url} ---")
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        response = requests.get(url, headers=headers, timeout=15)
+        logger.info(f"Request successful, Status Code: {response.status_code}")
+        
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        main_content = soup.find('article') or soup.find('main') or soup.find('div', class_=re.compile(r'content|main|post|body'))
+        
+        if main_content:
+            logger.info("Found main content tag (article, main, etc.). Extracting text.")
+            text = main_content.get_text(separator=' ', strip=True)
+        else:
+            logger.warning("Main content tag not found. Using entire <body> as fallback.")
+            body = soup.find('body')
+            if body:
+                text = body.get_text(separator=' ', strip=True)
+            else:
+                logger.error("Could not find <body> tag in the page.")
+                return None, "Could not find any content in the page."
+        
+        cleaned_text = ' '.join(text.split())
+        logger.info(f"--- Scrape successful! Extracted {len(cleaned_text)} chars. ---")
+        return cleaned_text, None
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error requesting URL: {e}", exc_info=True)
+        return None, f"Error fetching the URL. See server log for details."
+    except Exception as e:
+        logger.error(f"Unexpected error during content parsing: {e}", exc_info=True)
+        return None, f"An unexpected error occurred. See server log for details."

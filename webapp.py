@@ -1,23 +1,27 @@
-# ./webapp.py 
+# ./webapp.py
 
 import argparse
 import yaml
+import logging
 from flask import Flask, request, render_template, jsonify, session, redirect, url_for
 from flask_session import Session
 from urllib.parse import urlparse
 from factcheck.utils.config_loader import config
 from tasks import celery_app, run_fact_check_task
 
+from factcheck.utils.web_util import is_url, scrape_url_content
+
 
 app = Flask(__name__, static_folder="assets")
+
+app.logger.setLevel(logging.DEBUG)
 
 app.config["SESSION_PERMANENT"] = False
 app.config["SESSION_TYPE"] = "filesystem"
 Session(app)
 
 
-# --- Các bộ lọc Jinja không đổi ---
-def zip_lists(a, b):
+def zip_lists(a, b): 
     return zip(a, b)
 
 
@@ -35,7 +39,7 @@ app.jinja_env.filters["count_occurrences"] = count_occurrences
 
 
 def filter_evidences(input_dict, target_string, key):
-    if not isinstance(input_dict, list): 
+    if not isinstance(input_dict, list):
         return []
     return [item for item in input_dict if target_string == item.get(key)]
 
@@ -44,23 +48,15 @@ app.jinja_env.filters["filter_evidences"] = filter_evidences
 
 
 def extract_hostname(url):
-    """
-    Một bộ lọc Jinja tùy chỉnh để trích xuất tên miền từ một URL.
-    Ví dụ: 'https://www.example.com/page' -> 'example.com'
-    """
-    if not url or not isinstance(url, str):
+    if not url or not isinstance(url, str): 
         return ""
     try:
-        # Sử dụng urlparse để phân tích URL
         hostname = urlparse(url).hostname
-        # Loại bỏ 'www.' nếu có
-        if hostname and hostname.startswith('www.'):
+        if hostname and hostname.startswith('www.'): 
             return hostname[4:]
         return hostname or ""
-    except Exception:
-        return ""  # Trả về chuỗi rỗng nếu có lỗi
-
-# Đăng ký bộ lọc mới với Jinja2
+    except Exception: 
+        return ""
 
 
 app.jinja_env.filters['url_host'] = extract_hostname
@@ -69,82 +65,96 @@ app.jinja_env.filters['url_host'] = extract_hostname
 @app.route("/", methods=["GET", "POST"])
 def index():
     if request.method == "POST":
-        response_text = request.form.get("response", "")
-        if not response_text.strip():
-            return render_template("input.html", error="Please enter some text to check.")
+        app.logger.info("=" * 20 + " NEW REQUEST " + "=" * 20)
+        app.logger.debug(f"Received form data: {request.form}")
 
-        # THAY ĐỔI LỚN: Không gọi check_text() trực tiếp.
-        # Thay vào đó, đẩy task vào hàng đợi Celery.
-        # .delay() sẽ gửi task đi và trả về một đối tượng task ngay lập tức.
-        task = run_fact_check_task.delay(response_text)
+        input_text = request.form.get("response", "")
+        if not input_text.strip():
+            app.logger.warning("Empty input. Re-rendering input page.")
+            return render_template("input.html", error="Please enter some text or a URL to check.")
+
+        text_to_check = input_text.strip()
+        app.logger.info(f"Input sanitized: '{text_to_check}'")
         
-        # Chuyển hướng người dùng đến một trang loading,
-        # truyền theo task_id để frontend có thể theo dõi.
+        if is_url(text_to_check):
+            app.logger.info("Input detected as URL. Starting URL processing.")
+            content, error = scrape_url_content(text_to_check)
+            
+            if error:
+                app.logger.error(f"Scraping failed. Error: '{error}'. Re-rendering input page.")
+                return render_template("input.html", error=error)
+            
+            text_to_check = content 
+            
+            if not text_to_check or len(text_to_check) < 50:
+                error_msg = f"Insufficient content extracted from URL (only {len(text_to_check)} chars). Need at least 50."
+                app.logger.warning(error_msg)
+                return render_template("input.html", error=error_msg)
+            
+            app.logger.info("URL scraped successfully with sufficient content.")
+        else:
+            app.logger.info("Input is standard text, not a URL.")
+
+        app.logger.info("Preparing to send task to Celery...")
+        task = run_fact_check_task.delay(text_to_check)
+        app.logger.info(f"Task sent successfully! Task ID: {task.id}. Redirecting to loading page...")
+        
         return redirect(url_for('loading_page', task_id=task.id))
 
-    # Nếu là GET request, chỉ hiển thị trang nhập liệu
     return render_template("input.html")
-
-# --- THAY ĐỔI 3: Thêm các Route mới để theo dõi và hiển thị kết quả ---
 
 
 @app.route("/loading/<task_id>")
 def loading_page(task_id):
-    """
-    Trang này chỉ hiển thị một spinner và có Javascript để kiểm tra trạng thái.
-    """
     return render_template("loading.html", task_id=task_id)
 
 
 @app.route('/status/<task_id>')
 def task_status(task_id):
+    """
+    Check the status of the Celery task.
+    Updated to return 'info' payload for Streaming Progress (Optimization #5).
+    """
     task = celery_app.AsyncResult(task_id)
     
     if task.state == 'PENDING':
         response = {'state': task.state, 'status': 'Task is waiting in the queue...'}
-    elif task.state == 'PROGRESS':  # Trạng thái tùy chỉnh của chúng ta
+    
+    elif task.state == 'PROGRESS':
         response = {
-            'state': task.state,
-            'status': task.info.get('current_step', 'Processing...')
+            'state': task.state, 
+            'status': task.info.get('current_step', 'Processing...'),
+            'info': task.info 
         }
+        
     elif task.state == 'SUCCESS':
         task_result = task.get()
         session['factcheck_response'] = task_result.get('result')
         response = {'state': task.state, 'status': 'Complete!'}
+        
     elif task.state != 'FAILURE':
         response = {'state': task.state, 'status': 'Starting up...'}
-    else:  # FAILURE
-        response = {
-            'state': task.state,
-            'status': 'An error occurred. Please try again.',
-            'error': str(task.info)
-        }
+  
+    else:
+        response = {'state': task.state, 'status': 'An error occurred. Please try again.', 'error': str(task.info)}
+        
     return jsonify(response)
 
 
 @app.route('/final_result')
 def final_result_page():
-    """
-    Khi task hoàn thành, Javascript sẽ chuyển hướng đến đây.
-    Hàm này lấy kết quả từ session và render trang kết quả cuối cùng.
-    """
     response_data = session.get('factcheck_response', None)
     if response_data is None:
-        # Xử lý trường hợp người dùng truy cập trực tiếp URL này
         return redirect(url_for('index'))
-        
-    # Sử dụng template final_result.html (tên cũ là FailSafe_fc.html)
     return render_template("final_result.html", responses=response_data, shown_claim=0)
 
 
-# Route get_content để xem chi tiết từng claim vẫn giữ nguyên,
-# vì nó đọc dữ liệu từ session.
 @app.route("/shownClaim/<content_id>")
 def get_content(content_id):
     response_data = session.get('factcheck_response', None)
     if response_data is None:
         return "Session expired or no data found. Please submit your text again.", 404
-    try:
+    try: 
         claim_index = int(content_id) - 1
     except (ValueError, TypeError):
         return "Invalid claim ID.", 400
@@ -154,7 +164,6 @@ def get_content(content_id):
     return render_template("final_result.html", responses=response_data, shown_claim=claim_index)
 
 
-# --- THAY ĐỔI 2: Chạy app từ config ---
 if __name__ == "__main__":
     app.run(
         host=config.get('webapp.host'),

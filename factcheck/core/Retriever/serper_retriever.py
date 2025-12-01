@@ -1,27 +1,26 @@
-# ./factcheck/core/Retriever/serper_retriever.py (PHIÊN BẢN ĐÃ TỐI ƯU)
+# ./factcheck/core/Retriever/serper_retriever.py 
+
 import json
 import requests
 import re
 from factcheck.utils.logger import CustomLogger
 from factcheck.core.Screening import MetadataAnalyzer
+from factcheck.utils.deep_scraper import DeepScraper
 
 logger = CustomLogger(__name__).getlog()
 
 
 class SerperEvidenceRetriever:
     def __init__(self, llm_client, api_config: dict = None):
-        """Initializes the SerperEvidenceRetriever class."""
         self.lang = "en"
         self.serper_key = api_config.get("SERPER_API_KEY")
         if not self.serper_key:
             raise ValueError("SERPER_API_KEY not found in api_config.")
         self.llm_client = llm_client
         self.metadata_analyzer = MetadataAnalyzer(llm_client=self.llm_client)
-    
+        self.scraper = DeepScraper(max_workers=5)
+
     def retrieve_evidence(self, claim_queries_dict, top_k: int = 3, **kwargs):
-        """
-        Retrieves and screens evidences for the given claims.
-        """
         logger.info("Collecting and screening evidences...")
         query_list = [y for x in claim_queries_dict.items() for y in x[1]]
         
@@ -40,16 +39,11 @@ class SerperEvidenceRetriever:
         assert i == len(evidence_list_per_query)
         logger.info(f"Evidence collection and screening done! Found evidences for {len(claim_evidence_dict)} claims.")
         return claim_evidence_dict
-
-    # === HÀM ĐƯỢC THAY THẾ HOÀN TOÀN ===
+    
     def _retrieve_evidence_4_all_claim(
         self, query_list: list[str], top_k: int = 3
     ) -> list[list[dict]]:
-        """
-        [TỐI ƯU] Retrieves evidences for all queries and then screens them in a single batch.
-        """
-        # 1. Thu thập TẤT CẢ các evidence thô từ Serper
-        all_raw_evidences_map = {}  # Dùng dict để nhóm evidence theo query index
+        all_raw_evidences_map = {}  
         
         serper_responses = []
         for i in range(0, len(query_list), 100):
@@ -57,7 +51,7 @@ class SerperEvidenceRetriever:
             batch_response = self._request_serper_api(batch_query_list)
             if batch_response is None:
                 logger.error("Serper API request error!")
-                return [[] for _ in query_list]  # Trả về list rỗng
+                return [[] for _ in query_list]
             serper_responses.extend(batch_response.json())
             
         for i, (query, response) in enumerate(zip(query_list, serper_responses)):
@@ -74,19 +68,20 @@ class SerperEvidenceRetriever:
                             "url": result["link"]
                         })
             all_raw_evidences_map[i] = raw_evidences
-
-        # 2. Chuẩn bị cho việc screening hàng loạt
-        # Lấy ra danh sách tất cả các URL cần phân tích
         all_urls_to_analyze = [
             ev['url'] for evidences in all_raw_evidences_map.values() for ev in evidences 
             if ev.get('url') and ev.get('url') != 'Google Answer Box'
         ]
-        
-        # Gọi hàm analyze_batch MỘT LẦN DUY NHẤT
         logger.info(f"Batch analyzing trust level for {len(set(all_urls_to_analyze))} unique URLs...")
         url_trust_info = self.metadata_analyzer.analyze_batch(all_urls_to_analyze)
         
-        # 3. Gắn nhãn và lọc evidence
+        high_trust_urls = []
+        for url, info in url_trust_info.items():
+            if info.get('trust_level') == 'high':
+                high_trust_urls.append(url)
+        logger.info(f"Deep scraping contents for {len(high_trust_urls)} high-trust URLs...")
+        scraped_contents = self.scraper.scrape_batch(high_trust_urls)
+
         evidences_per_query = [[] for _ in query_list]
         for query_index, evidences in all_raw_evidences_map.items():
             screened_evidences = []
@@ -99,11 +94,12 @@ class SerperEvidenceRetriever:
                     evidence['trust_level'] = trust_info.get('trust_level', 'unknown')
                 else:
                     evidence['trust_level'] = 'unknown'
-
+                if url in scraped_contents:
+                    full_text = scraped_contents[url]
+                    evidence['text'] = f"[FULL CONTENT EXTRACTED]\n{full_text}"
+                    logger.info(f"Enriched evidence for {url} with deep content ({len(full_text)} chars).")
                 if evidence['trust_level'] != 'low':
                     screened_evidences.append(evidence)
-                else:
-                    logger.warning(f"Discarding evidence from low-trust source: {url}")
             
             evidences_per_query[query_index] = screened_evidences
 
@@ -131,8 +127,6 @@ class SerperEvidenceRetriever:
             logger.error(f"An error occurred while calling Serper API: {e}")
         return None
 
-
-# Phần `if __name__ == "__main__":` giữ nguyên
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()

@@ -17,7 +17,7 @@ class GPTClient(BaseClient):
         self.client = OpenAI(api_key=self.api_config["OPENAI_API_KEY"])
 
     def _call(self, messages: str, **kwargs):
-        seed = kwargs.get("seed", 42)  # default seed is 42
+        seed = kwargs.get("seed", 42)  
         assert type(seed) is int, "Seed must be an integer."
 
         response = self.client.chat.completions.create(
@@ -43,7 +43,6 @@ class GPTClient(BaseClient):
             print("Warning: prompt_tokens or completion_token not found in usage_dict")
 
     def get_request_length(self, messages):
-        # TODO: check if we should return the len(menages) instead
         return 1
 
     def construct_message_list(

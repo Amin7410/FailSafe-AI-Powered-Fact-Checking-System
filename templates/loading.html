@@ -1,64 +1,113 @@
+<!-- templates/loading.html -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Checking Facts...</title>
-    <!-- Thêm các file CSS của bạn nếu muốn -->
-    <link href="{{ url_for('static', filename='assets/css/vendor.min.css') }}" rel="stylesheet" type="text/css" />
-    <link href="{{ url_for('static', filename='assets/css/app.min.css') }}" rel="stylesheet" type="text/css" />
+    <title>FailSafe Live Analysis</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
-        body { display: flex; justify-content: center; align-items: center; height: 100vh; text-align: center; }
-        .spinner-border { width: 3rem; height: 3rem; }
+        body { background-color: #f8f9fa; padding-top: 50px; }
+        .claim-row { transition: all 0.5s; }
+        .status-badge { min_width: 100px; text-align: center; }
     </style>
 </head>
 <body>
-    <div>
-        <h1>Analyzing your text...</h1>
-        <p id="status-text">The AI is warming up. This may take a moment.</p>
-        <div class="spinner-border text-primary m-2" role="status">
-            <span class="visually-hidden">Loading...</span>
+    <div class="container" style="max_width: 800px;">
+        <div class="text-center mb-5">
+            <h2 id="main-status">Initializing FailSafe AI...</h2>
+            <div class="progress mt-3">
+                <div id="progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%"></div>
+            </div>
+            <p class="text-muted mt-2" id="sub-status">Connecting to satellite...</p>
         </div>
-        <p><small>You will be redirected automatically when the analysis is complete.</small></p>
+        <div class="card shadow-sm" id="live-results-card" style="display: none;">
+            <div class="card-header bg-white fw-bold">
+                Live Verification Stream
+            </div>
+            <ul class="list-group list-group-flush" id="claims-list">
+            </ul>
+        </div>
     </div>
 
     <script>
-        // Hàm để kiểm tra trạng thái của task
-        function checkStatus(taskUrl) {
-            fetch(taskUrl)
+        const taskId = "{{ task_id }}";
+        let claimsRendered = false;
+
+        function updateClaimStatus(id, status) {
+            const badge = document.getElementById(`badge-${id}`);
+            if (!badge) return;
+
+            badge.className = 'badge status-badge rounded-pill';
+            if (status === 'SUPPORTED') {
+                badge.classList.add('bg-success');
+                badge.textContent = 'TRUE';
+            } else if (status === 'REFUTED') {
+                badge.classList.add('bg-danger');
+                badge.textContent = 'FALSE';
+            } else if (status === 'SKIPPED') {
+                badge.classList.add('bg-secondary');
+                badge.textContent = 'SKIPPED';
+            } else {
+                badge.classList.add('bg-warning', 'text-dark');
+                badge.textContent = 'MIXED';
+            }
+        }
+
+        function checkStatus() {
+            fetch(`/status/${taskId}`)
                 .then(response => response.json())
                 .then(data => {
-                    // Cập nhật thông báo trạng thái
-                    const statusElement = document.getElementById('status-text');
-                    statusElement.textContent = data.status || 'Processing...';
+                    const state = data.state;
+                    const statusText = data.status;
+                    
+                    document.getElementById('sub-status').textContent = statusText;
 
-                    // Nếu task thành công (SUCCESS)
-                    if (data.state === 'SUCCESS') {
-                        // Chuyển hướng đến trang kết quả cuối cùng
-                        window.location.href = `/final_result`;
-                    } 
-                    // Nếu task chưa xong, tiếp tục kiểm tra sau 3 giây
-                    else if (data.state !== 'FAILURE') {
-                        setTimeout(() => {
-                            checkStatus(taskUrl);
-                        }, 3000); // 3 giây
-                    } 
-                    // Nếu task thất bại
-                    else {
-                        statusElement.textContent = "An error occurred: " + data.status;
+                    if (data.info && data.info.data) {
+                        const payload = data.info.data;
+
+                        if (payload.event === 'CLAIMS_READY' && !claimsRendered) {
+                            document.getElementById('live-results-card').style.display = 'block';
+                            document.getElementById('main-status').textContent = "Analyzing Claims...";
+                            
+                            const list = document.getElementById('claims-list');
+                            list.innerHTML = ''; 
+                            
+                            payload.claims.forEach(claim => {
+                                const li = document.createElement('li');
+                                li.className = 'list-group-item d-flex justify-content-between align-items-center claim-row';
+                                li.innerHTML = `
+                                    <span>${claim.text}</span>
+                                    <span id="badge-${claim.id}" class="badge bg-light text-dark border status-badge rounded-pill">
+                                        ${claim.status === 'SKIPPED' ? 'SKIPPED' : 'CHECKING...'}
+                                    </span>
+                                `;
+                                list.appendChild(li);
+                            });
+                            claimsRendered = true;
+                        }
+
+                        if (payload.event === 'BATCH_DONE' && payload.updates) {
+                            payload.updates.forEach(update => {
+                                updateClaimStatus(update.id, update.status);
+                            });
+                        }
                     }
-                })
-                .catch(err => {
-                    console.error("Error checking status:", err);
-                    document.getElementById('status-text').textContent = "Connection error. Could not check status.";
+
+                    if (state === 'SUCCESS') {
+                        document.getElementById('main-status').textContent = "Analysis Complete!";
+                        document.getElementById('progress-bar').className = "progress-bar bg-success";
+                        setTimeout(() => window.location.href = `/final_result`, 1000);
+                    } else if (state === 'FAILURE') {
+                        document.getElementById('main-status').textContent = "Error Occurred";
+                        document.getElementById('progress-bar').className = "progress-bar bg-danger";
+                    } else {
+                        setTimeout(checkStatus, 1000); 
+                    }
                 });
         }
 
-        // Bắt đầu quá trình kiểm tra ngay khi trang được tải
-        document.addEventListener('DOMContentLoaded', () => {
-            const taskUrl = `/status/{{ task_id }}`;
-            checkStatus(taskUrl);
-        });
+        document.addEventListener('DOMContentLoaded', checkStatus);
     </script>
 </body>
 </html>

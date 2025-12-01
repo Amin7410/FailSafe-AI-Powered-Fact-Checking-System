@@ -1,3 +1,5 @@
+# requirements.txt
+
 anthropic
 backoff
 bs4
@@ -33,3 +35,6 @@ celery
 redis
 PyYAML
 python-dotenv
+beautifulsoup4
+requests
+trafilatura>=1.6.0

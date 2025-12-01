@@ -1,98 +1,99 @@
-# ./factcheck/__init__.py (PHIÊN BẢN SỬA LỖI API KEY)
+# ./factcheck/__init__.py
 
-import concurrent.futures
 import time
 import tiktoken
+import json
 from dataclasses import asdict
+
 from factcheck.utils.llmclient import CLIENTS, model2client
 from factcheck.utils.prompt import prompt_mapper
 from factcheck.utils.logger import CustomLogger
-# === BƯỚC 1: IMPORT HÀM load_api_config ===
 from factcheck.utils.api_config import load_api_config
+from factcheck.utils.data_class import PipelineUsage, FactCheckOutput, ClaimDetail, FCSummary
+from factcheck.utils.graph_utils import sag_to_graph, get_claims_from_graph, graph_to_networkx_dict 
+
 from .core.Screening import MetadataAnalyzer, StylometryAnalyzer, ScreeningAdvisor
 from .core.Coreference import ReferenceResolver
-from factcheck.utils.data_class import PipelineUsage, FactCheckOutput, ClaimDetail, FCSummary
-# Đảm bảo import này đúng
-from factcheck.utils.graph_utils import sag_to_graph, get_claims_from_graph, graph_to_networkx_dict 
 from factcheck.core import (
     Decompose,
     Checkworthy,
     QueryGenerator,
     retriever_mapper,
-    ClaimVerify,)
+    ClaimVerify,
+)
+from factcheck.core.KnowledgeBase import FactKnowledgeBase
 
 logger = CustomLogger(__name__).getlog()
 
 
 class FactCheck:
+    """
+    Core Controller of the FailSafe System.
+    Refactored to use Dependency Injection.
+    """
     def __init__(
         self,
-        default_model: str = "gemini-pro",  # Đổi về model ổn định
-        client: str = None,
-        prompt: str = "gemini_prompt",
-        retriever: str = "hybrid",
-        decompose_model: str = None,
-        checkworthy_model: str = None,
-        query_generator_model: str = None,
-        evidence_retrieval_model: str = None,
-        claim_verify_model: str = None,
-        api_config: dict = None,  # api_config này có thể là dict đọc từ file yaml
+        metadata_analyzer: MetadataAnalyzer,
+        stylometry_analyzer: StylometryAnalyzer,
+        screening_advisor: ScreeningAdvisor,
+        reference_resolver: ReferenceResolver,
+        decomposer: Decompose,
+        checkworthy: Checkworthy,
+        query_generator: QueryGenerator,
+        evidence_crawler, 
+        claimverify: ClaimVerify,
+        knowledge_base: FactKnowledgeBase,
+        prompt_handler,
+        encoding=None,
         num_seed_retries: int = 3,
     ):
+        self.metadata_analyzer = metadata_analyzer
+        self.stylometry_analyzer = stylometry_analyzer
+        self.screening_advisor = screening_advisor
+        self.reference_resolver = reference_resolver
         
-        self.encoding = tiktoken.get_encoding("cl100k_base")
-        self.prompt = prompt_mapper(prompt_name=prompt)
+        self.decomposer = decomposer
+        self.checkworthy = checkworthy
+        self.query_generator = query_generator
+        self.evidence_crawler = evidence_crawler
+        self.claimverify = claimverify
         
-        # === BƯỚC 2: GỌI HÀM load_config NGAY KHI KHỞI TẠO ===
-        # Hàm này sẽ lấy dict từ file yaml (nếu có) và hợp nhất nó với các biến môi trường.
-        self.load_config(api_config=api_config)
+        self.knowledge_base = knowledge_base
+        self.prompt = prompt_handler
+        
+        self.num_seed_retries = num_seed_retries
+        self.encoding = encoding if encoding else tiktoken.get_encoding("cl100k_base")
 
-        step_models = {
-            "decompose_model": decompose_model,
-            "checkworthy_model": checkworthy_model,
-            "query_generator_model": query_generator_model,
-            "evidence_retrieval_model": evidence_retrieval_model,
-            "claim_verify_model": claim_verify_model,
+        self.llm_components = {
+            "decomposer": self.decomposer,
+            "checkworthy": self.checkworthy,
+            "query_generator": self.query_generator,
+            "evidence_crawler": self.evidence_crawler,
+            "claimverify": self.claimverify
         }
 
-        self.model_clients = {}
-        for key, _model_name in step_models.items():
-            _model_name = default_model if _model_name is None else _model_name
-            print(f"== Init {key} with model: {_model_name}")
-            if client is not None:
-                logger.info(f"== Use specified client: {client}")
-                LLMClient = CLIENTS[client]
-            else:
-                logger.info("== LLMClient is not specified, use default llm client.")
-                LLMClient = model2client(_model_name)
-            
-            # Truyền `self.api_config` (đã được xử lý đầy đủ) vào các client
-            self.model_clients[key] = LLMClient(model=_model_name, api_config=self.api_config)
+        logger.info("=== FactCheck Core Initialized (DI Mode) ===")
 
-        self.metadata_analyzer = MetadataAnalyzer(llm_client=self.model_clients['checkworthy_model'])
-        self.stylometry_analyzer = StylometryAnalyzer()
-        self.screening_advisor = ScreeningAdvisor()
-        self.reference_resolver = ReferenceResolver() 
-        self.decomposer = Decompose(llm_client=self.model_clients['decompose_model'], prompt=self.prompt)
-        self.checkworthy = Checkworthy(llm_client=self.model_clients['checkworthy_model'], prompt=self.prompt)
-        self.query_generator = QueryGenerator(llm_client=self.model_clients['query_generator_model'], prompt=self.prompt)
-        self.evidence_crawler = retriever_mapper(retriever_name=retriever)(
-            llm_client=self.model_clients['evidence_retrieval_model'], api_config=self.api_config
+    def _get_usage(self) -> PipelineUsage:
+        """Collect token usage from all LLM-based components."""
+        total_usage = {}
+        for name, component in self.llm_components.items():
+            if hasattr(component, 'llm_client'):
+                total_usage[name] = component.llm_client.usage
+       
+        return PipelineUsage(
+            decomposer=total_usage.get('decomposer'),
+            checkworthy=total_usage.get('checkworthy'),
+            query_generator=total_usage.get('query_generator'),
+            evidence_crawler=total_usage.get('evidence_crawler'),
+            claimverify=total_usage.get('claimverify')
         )
-        self.claimverify = ClaimVerify(llm_client=self.model_clients['claim_verify_model'], prompt=self.prompt)
-        self.attr_list = ["decomposer", "checkworthy", "query_generator", "evidence_crawler", "claimverify"]
-        self.num_seed_retries = num_seed_retries
 
-        logger.info("===Sub-modules Init Finished===")
-
-    # === BƯỚC 3: ĐẢM BẢO HÀM load_config SỬ DỤNG ĐÚNG LOGIC ===
-    def load_config(self, api_config: dict) -> None:
-        """
-        Loads API config by merging the provided dict (e.g., from a yaml file) 
-        with system environment variables. Environment variables are used as fallbacks.
-        """
-        # Gọi hàm tiện ích đã có sẵn từ `api_config.py` để thực hiện việc hợp nhất
-        self.api_config = load_api_config(api_config)
+    def _reset_usage(self):
+        """Reset token counters for a new request."""
+        for component in self.llm_components.values():
+            if hasattr(component, 'llm_client'):
+                component.llm_client.reset_usage()
 
     def _screen_input(self, raw_text: str):
         logger.info("--- Running Layer 0: Rapid Screening ---")
@@ -121,20 +122,6 @@ class FactCheck:
 
         analysis_data = {"metadata": metadata_result, "style": style_result}
         return False, analysis_data
-
-    def _get_usage(self):
-        total_usage = {}
-        for attr in self.attr_list:
-            module = getattr(self, attr)
-            if hasattr(module, 'llm_client'):
-                total_usage[attr] = module.llm_client.usage
-        return PipelineUsage(**total_usage)
-
-    def _reset_usage(self):
-        for attr in self.attr_list:
-            module = getattr(self, attr)
-            if hasattr(module, 'llm_client'):
-                module.llm_client.reset_usage()
 
     def _merge_claim_details(
         self, original_claims: list, claim2checkworthy: dict, claim2queries: dict, claim2verifications: dict
@@ -171,6 +158,51 @@ class FactCheck:
             claim_details.append(claim_obj)
         return claim_details
 
+    def _generate_comprehensive_report(self, raw_text: str, claim_details: list[ClaimDetail]) -> str:
+        logger.info("--- Running Layer 4: Synthesis & Reporting (The Editor-in-Chief) ---")
+        
+        claims_data_for_llm = []
+        for c in claim_details:
+            if c.factuality == "Nothing to check.":
+                continue
+                
+            evidence_summary = []
+            if c.evidences:
+                for e in c.evidences:
+                    evidence_summary.append({
+                        "source_url": e.url,
+                        "council_debate_log": e.reasoning
+                    })
+            
+            claims_data_for_llm.append({
+                "claim_id": c.id,
+                "claim_text": c.claim,
+                "verdict_score": c.factuality, 
+                "evidence_analysis": evidence_summary
+            })
+        
+        if not claims_data_for_llm:
+            return "No verifiable claims found to report on."
+
+        claims_json_str = json.dumps(claims_data_for_llm, indent=2)
+        prompt_content = self.prompt.report_prompt.format(
+            raw_text=raw_text,
+            claims_json=claims_json_str
+        )
+
+        messages = self.claimverify.llm_client.construct_message_list([prompt_content])
+        
+        try:
+            report_markdown = self.claimverify.llm_client.call(messages, num_retries=2)
+            if report_markdown.startswith("```markdown"):
+                report_markdown = report_markdown[11:-3].strip()
+            elif report_markdown.startswith("```"):
+                report_markdown = report_markdown[3:-3].strip()
+            return report_markdown
+        except Exception as e:
+            logger.error(f"Failed to generate report: {e}")
+            return "Failed to generate comprehensive report due to an unexpected error."
+
     def _finalize_factcheck(
         self, raw_text: str, sag: dict = None, claim_detail: list[ClaimDetail] = None, return_dict: bool = True, summary_override: dict = None
     ) -> FactCheckOutput:
@@ -181,6 +213,7 @@ class FactCheck:
                 num_supported_claims=0, num_refuted_claims=0, num_controversial_claims=0,
                 factuality=summary_override.get("message")
             )
+            final_report_markdown = None
         else:
             claim_detail = claim_detail or []
             verified_claims = [c for c in claim_detail if isinstance(c.factuality, float)]
@@ -199,35 +232,31 @@ class FactCheck:
                 num_supported_claims, num_refuted_claims, num_controversial_claims,
                 factuality=overall_factuality,
             )
+            final_report_markdown = self._generate_comprehensive_report(raw_text, claim_detail)
 
         num_tokens = len(self.encoding.encode(raw_text))
         
         output = FactCheckOutput(
             raw_text=raw_text, token_count=num_tokens,
             usage=self._get_usage(), claim_detail=claim_detail, summary=summary,
+            final_report=final_report_markdown
         )
 
         logger.info(f"== Overall Factuality: {output.summary.factuality}\n")
 
         output_dict = asdict(output)
         output_dict['sag'] = sag or {"nodes": [], "edges": []}
+        output_dict['final_report'] = final_report_markdown
 
         self.screening_advisor.learn_from_result(raw_text, output_dict)
 
         if return_dict:
-            final_output_dict = asdict(output)
-            final_output_dict['sag'] = sag or {"nodes": [], "edges": []}
-            return final_output_dict
+            return output_dict
         else:
             output.sag = sag or {"nodes": [], "edges": []} 
             return output
         
     def check_text_with_progress(self, raw_text: str, progress_callback):
-        """
-        Phiên bản của check_text có gọi một hàm callback để báo cáo tiến trình.
-        Callback function signature: callback(state: str, message: str)
-        """
-        
         self._reset_usage()
 
         progress_callback('PROGRESS', 'Step 1/5: Screening for obvious misinformation...')
@@ -238,21 +267,16 @@ class FactCheck:
 
         should_exit, screen_result = self._screen_input(raw_text)
         if should_exit:
-            # Nếu thoát sớm, vẫn gọi callback lần cuối để báo hoàn thành
             progress_callback('SUCCESS', 'Screening complete. Early exit triggered.')
             return screen_result
 
         progress_callback('PROGRESS', 'Step 2/5: Decomposing text into claims...')
         logger.info("--- Layer 0 passed. Proceeding with full pipeline. ---")
         st_time = time.time()
+        
         logger.info("Resolving coreferences to improve context...")
         resolved_text = self.reference_resolver.resolve(raw_text)
-        if resolved_text != raw_text:
-            logger.info(f"Text resolved. Length changed from {len(raw_text)} to {len(resolved_text)}.")
-            logger.debug(f"Resolved text preview: {resolved_text[:100]}...")
-        else:
-            logger.info("No coreferences needed resolution.")
-
+        
         logger.info("Decomposing text into a Structured Argumentation Graph (SAG)...")
         sag_jsonld = self.decomposer.create_sag(
             doc=resolved_text, 
@@ -262,69 +286,230 @@ class FactCheck:
         sag_graph = sag_to_graph(sag_jsonld)
         extracted_claims_info = get_claims_from_graph(sag_graph)
         claims_from_nodes = [item['label'] for item in extracted_claims_info]
-        
         sag_dict_for_output = graph_to_networkx_dict(sag_graph)
         
         if not claims_from_nodes:
-            logger.warning("SAG decomposition did not return any verifiable claims. Finalizing report.")
+            logger.warning("SAG decomposition did not return any verifiable claims.")
             progress_callback('SUCCESS', 'Analysis complete. No verifiable claims found.')
             return self._finalize_factcheck(raw_text=raw_text, sag=sag_dict_for_output, claim_detail=[], return_dict=True)
+
+        original_count = len(claims_from_nodes)
+        claims_from_nodes = self.decomposer.deduplicate_claims(claims_from_nodes, threshold=0.85)
+        if len(claims_from_nodes) < original_count:
+            logger.info(f"Deduplicated claims: {original_count} -> {len(claims_from_nodes)}")
+            progress_callback('PROGRESS', f'Step 2.5: Optimized claims (Removed {original_count - len(claims_from_nodes)} duplicates)...')
 
         logger.info("Identifying check-worthy claims from SAG nodes...")
         checkworthy_claims, claim2checkworthy = self.checkworthy.identify_checkworthiness(
             claims_from_nodes, num_retries=self.num_seed_retries
         )
 
+        preview_claims = []
+        for i, txt in enumerate(claims_from_nodes):
+            status = "PENDING"
+            if txt not in checkworthy_claims:
+                status = "SKIPPED"
+            preview_claims.append({"id": i + 1, "text": txt, "status": status})
+        
+        progress_callback('PROGRESS', 'Claims identified. Starting verification...', {
+            "event": "CLAIMS_READY",
+            "claims": preview_claims
+        })
+
         if not checkworthy_claims:
-            logger.info("No check-worthy claims found after analysis. Finalizing report.")
+            logger.info("No check-worthy claims found after analysis.")
             claim_detail = self._merge_claim_details(
                 original_claims=claims_from_nodes,
                 claim2checkworthy=claim2checkworthy,
-                claim2queries={}, 
-                claim2verifications={}
+                claim2queries={}, claim2verifications={}
             )
             progress_callback('SUCCESS', 'Analysis complete. No check-worthy claims found.')
             return self._finalize_factcheck(raw_text=raw_text, sag=sag_dict_for_output, claim_detail=claim_detail, return_dict=True)
+
+        progress_callback('PROGRESS', 'Step 2.8: Checking Knowledge Base for existing facts...')
+        claims_to_process = []
+        cached_results_map = {} 
+
+        for claim in checkworthy_claims:
+            cached_detail = self.knowledge_base.check_cache(claim)
+            if cached_detail:
+                cached_results_map[claim] = cached_detail
+                c_id = claims_from_nodes.index(claim) + 1 if claim in claims_from_nodes else 0
+                progress_callback('PROGRESS', f"Found cached result for claim #{c_id}", {
+                    "event": "BATCH_DONE",
+                    "updates": [{"id": c_id, "status": "CACHED_TRUE" if cached_detail.factuality > 0.5 else "CACHED_FALSE"}]
+                })
+            else:
+                claims_to_process.append(claim)
         
-        progress_callback('PROGRESS', 'Step 3/5: Generating search queries...')
-        logger.info(f"Generating queries for {len(checkworthy_claims)} check-worthy claims...")
-        claim_queries_dict = self.query_generator.generate_query(claims=checkworthy_claims)
-        step123_time = time.time()
-        
-        progress_callback('PROGRESS', 'Step 4/5: Retrieving evidence from trusted sources...')
-        logger.info("Retrieving evidence...")
-        claim_evidences_dict = self.evidence_crawler.retrieve_evidence(claim_queries_dict=claim_queries_dict)
-        step4_time = time.time()
-        
-        progress_callback('PROGRESS', 'Step 5/5: Verifying claims with AI council...')
-        logger.info("Verifying claims against evidence...")
-        claim_verifications_dict = self.claimverify.verify_claims(claim_evidences_dict=claim_evidences_dict)
-        step5_time = time.time()
+        if cached_results_map:
+            logger.info(f"Skipping verification for {len(cached_results_map)} claims found in cache.")
+
+        new_claim_verifications_dict = {}
+        new_claim_queries_dict = {}
+
+        if claims_to_process:
+            progress_callback('PROGRESS', f'Step 3/5: Generating search queries for {len(claims_to_process)} new claims...')
+            new_claim_queries_dict = self.query_generator.generate_query(claims=claims_to_process)
+            
+            progress_callback('PROGRESS', 'Step 4/5: Retrieving evidence (Deep Search)...')
+            new_claim_evidences_dict = self.evidence_crawler.retrieve_evidence(claim_queries_dict=new_claim_queries_dict)
+            
+            progress_callback('PROGRESS', 'Step 5/5: Verifying claims with AI council...')
+            
+            batch_size = 5
+            for i in range(0, len(claims_to_process), batch_size):
+                batch_claims = claims_to_process[i : i + batch_size]
+                batch_evidence_input = {k: new_claim_evidences_dict[k] for k in batch_claims if k in new_claim_evidences_dict}
+                
+                if not batch_evidence_input: 
+                    continue
+
+                batch_result = self.claimverify.verify_claims(batch_evidence_input)
+                new_claim_verifications_dict.update(batch_result)
+                
+                verified_updates = []
+                for claim_txt, evidences in batch_result.items():
+                    c_id = -1
+                    if claim_txt in claims_from_nodes:
+                        c_id = claims_from_nodes.index(claim_txt) + 1
+                    
+                    labels = [e.relationship for e in evidences]
+                    if "REFUTES" in labels: 
+                        status = "REFUTED"
+                    elif "SUPPORTS" in labels: 
+                        status = "SUPPORTED"
+                    else: 
+                        status = "INCONCLUSIVE"
+                    
+                    verified_updates.append({"id": c_id, "status": status})
+
+                progress_callback('PROGRESS', f'Verified {min(i + batch_size, len(claims_to_process))}/{len(claims_to_process)} new claims...', {
+                    "event": "BATCH_DONE",
+                    "updates": verified_updates
+                })
+            step5_time = time.time()
+        else:
+            logger.info("All claims resolved from Cache.")
+            step5_time = time.time()
 
         logger.info(
-            "== State: Done! \n Total time: %.2fs. (create claims:%.2fs ||| retrieve:%.2fs ||| verify:%.2fs)",
-            step5_time - st_time,
-            step123_time - st_time,
-            step4_time - step123_time,
-            step5_time - step4_time
+            "== State: Done! \n Total time: %.2fs.",
+            step5_time - st_time
         )
         
-        progress_callback('PROGRESS', 'Finalizing report...')
+        progress_callback('PROGRESS', 'Finalizing report (Editor-in-Chief is writing)...')
 
-        claim_detail = self._merge_claim_details(
-            original_claims=claims_from_nodes,
+        new_claim_details_objects = self._merge_claim_details(
+            original_claims=claims_to_process,
             claim2checkworthy=claim2checkworthy,
-            claim2queries=claim_queries_dict,
-            claim2verifications=claim_verifications_dict,
+            claim2queries=new_claim_queries_dict,
+            claim2verifications=new_claim_verifications_dict,
         )
-        return self._finalize_factcheck(raw_text=raw_text, sag=sag_dict_for_output, claim_detail=claim_detail, return_dict=True)
+
+        for detail in new_claim_details_objects:
+            self.knowledge_base.save_knowledge(detail)
+
+        final_claim_details = []
+        
+        for i, original_claim in enumerate(claims_from_nodes):
+            if original_claim not in checkworthy_claims:
+                detail = ClaimDetail(
+                    id=i + 1, claim=original_claim, checkworthy=False,
+                    checkworthy_reason=claim2checkworthy.get(original_claim, "Not check-worthy"),
+                    origin_text=original_claim, start=-1, end=-1,
+                    queries=[], evidences=[], factuality="Nothing to check."
+                )
+                final_claim_details.append(detail)
+                continue
+
+            if original_claim in cached_results_map:
+                detail = cached_results_map[original_claim]
+                detail.id = i + 1 
+                final_claim_details.append(detail)
+                continue
+
+            found = False
+            for d in new_claim_details_objects:
+                if d.claim == original_claim:
+                    d.id = i + 1
+                    final_claim_details.append(d)
+                    found = True
+                    break
+            if not found:
+                logger.warning(f"Claim '{original_claim}' was lost during processing.")
+
+        return self._finalize_factcheck(raw_text=raw_text, sag=sag_dict_for_output, claim_detail=final_claim_details, return_dict=True)
     
     def check_text(self, raw_text: str):
-        """
-        Hàm gốc, bây giờ nó sẽ gọi hàm mới mà không có callback.
-        Điều này đảm bảo tính tương thích ngược nếu bạn gọi `check_text` từ nơi khác.
-        """
-        def no_op_callback(state, message):
-            # Một hàm callback rỗng, không làm gì cả
+        def no_op_callback(state, message, payload=None):
             pass
         return self.check_text_with_progress(raw_text, no_op_callback)
+
+
+def build_fact_check_system(
+    default_model: str = "gemini-pro",
+    client: str = None,
+    prompt_name: str = "gemini_prompt",
+    retriever_name: str = "hybrid",
+    api_config: dict = None,
+    step_models: dict = None 
+) -> FactCheck:
+
+    final_api_config = load_api_config(api_config)
+    prompt = prompt_mapper(prompt_name=prompt_name)
+    
+    if step_models is None:
+        step_models = {}
+
+    steps_needing_llm = [
+        "decompose_model", 
+        "checkworthy_model", 
+        "query_generator_model", 
+        "evidence_retrieval_model", 
+        "claim_verify_model"
+    ]
+    
+    clients = {}
+    for key in steps_needing_llm:
+        _model_name = step_models.get(key, default_model)
+        
+        if client is not None:
+            LLMClientClass = CLIENTS[client]
+        else:
+            LLMClientClass = model2client(_model_name)
+            
+        print(f"== [Factory] Init {key} with model: {_model_name}")
+        clients[key] = LLMClientClass(model=_model_name, api_config=final_api_config)
+
+    metadata_analyzer = MetadataAnalyzer(llm_client=clients['checkworthy_model'])
+    stylometry_analyzer = StylometryAnalyzer()
+    screening_advisor = ScreeningAdvisor()
+    reference_resolver = ReferenceResolver()
+    
+    decomposer = Decompose(llm_client=clients['decompose_model'], prompt=prompt)
+    checkworthy = Checkworthy(llm_client=clients['checkworthy_model'], prompt=prompt)
+    query_generator = QueryGenerator(llm_client=clients['query_generator_model'], prompt=prompt)
+    
+    RetrieverClass = retriever_mapper(retriever_name=retriever_name)
+    evidence_crawler = RetrieverClass(
+        llm_client=clients['evidence_retrieval_model'], 
+        api_config=final_api_config
+    )
+    
+    claimverify = ClaimVerify(llm_client=clients['claim_verify_model'], prompt=prompt)
+    knowledge_base = FactKnowledgeBase()
+
+    return FactCheck(
+        metadata_analyzer=metadata_analyzer,
+        stylometry_analyzer=stylometry_analyzer,
+        screening_advisor=screening_advisor,
+        reference_resolver=reference_resolver,
+        decomposer=decomposer,
+        checkworthy=checkworthy,
+        query_generator=query_generator,
+        evidence_crawler=evidence_crawler,
+        claimverify=claimverify,
+        knowledge_base=knowledge_base,
+        prompt_handler=prompt
+    )

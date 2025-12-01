@@ -24,7 +24,7 @@ class LocalOpenAIClient(BaseClient):
         openai.base_url = api_config["LOCAL_API_URL"]
 
     def _call(self, messages: str, **kwargs):
-        seed = kwargs.get("seed", 42)  # default seed is 42
+        seed = kwargs.get("seed", 42) 
         assert type(seed) is int, "Seed must be an integer."
 
         response = openai.chat.completions.create(
@@ -37,7 +37,6 @@ class LocalOpenAIClient(BaseClient):
         return r
 
     def get_request_length(self, messages):
-        # TODO: check if we should return the len(menages) instead
         return 1
 
     def construct_message_list(

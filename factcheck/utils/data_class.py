@@ -25,7 +25,7 @@ class PipelineUsage:
 @dataclass
 class Evidence:
     claim: str = None
-    text: str = None  # evidence text
+    text: str = None  
     url: str = None
     reasoning: str = None
     relationship: str = None
@@ -40,21 +40,6 @@ class Evidence:
 
 @dataclass
 class ClaimDetail:
-    """Dataclass to store the details of a claim.
-
-    Attributes:
-        id (int): The unique identifier of the claim. [create from checkworthy]
-        claim (str): The claim text. [create from checkworthy]
-        checkworthy (bool): Whether the claim is checkworthy. [create from checkworthy]
-        checkworthy_reason (str): The reason why the claim is checkworthy. [create from checkworthy]
-        origin_text (str): The original text from which the claim was extracted. [create from decompose]
-        start (int): The start index of the claim in the original text. [create from decompose]
-        end (int): The end index of the claim in the original text. [create from decompose]
-        queries (List[str]): The list of queries generated for the claim. [create from query_generator]
-        evidences (List[Evidence]): The list of evidences retrieved for the claim. [createfrom evidence_crawler]
-        factuality (any): The factuality of the claim. [create by summarize evidences]
-            possible values: "Nothing to check.", "No evidence found", float in [0, 1]
-    """
 
     id: int = None
     claim: str = None
@@ -81,18 +66,6 @@ class ClaimDetail:
 
 @dataclass
 class FCSummary:
-    """Dataclass to store the summary of the fact-checking process.
-
-    Attributes:
-        num_claims (int): The number of claims processed. [create from decompose]
-        num_checkworthy_claims (int): The number of claims identified as checkworthy. [create from checkworthy]
-        num_verified_claims (int): The number of claims that were verified. [create from claimverify - no evidence founded claims]
-        num_supported_claims (int)
-        num_refuted_claims (int)
-        num_controversial_claims (int)
-        factuality (float): The overall factuality.
-    """
-
     num_claims: int = None
     num_checkworthy_claims: int = None
     num_verified_claims: int = None
@@ -116,6 +89,7 @@ class FactCheckOutput:
     usage: PipelineUsage = None
     claim_detail: List[ClaimDetail] = None
     summary: FCSummary = None
+    final_report: str = None
 
     def attribute_check(self) -> bool:
         for field in self.__dataclass_fields__.values():

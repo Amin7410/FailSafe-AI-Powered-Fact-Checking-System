@@ -1,0 +1,57 @@
+services:
+  redis:
+    image: redis:7
+    container_name: failsafe_redis
+    ports:
+      - "6379:6379"
+
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: failsafe_chroma
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma_data:/chroma/.chroma
+
+  web:
+    build: .
+    container_name: failsafe_web
+    command: python webapp.py
+    ports:
+      - "2024:2024"
+    env_file:
+      - .env
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CHROMA_MODE=server
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+    depends_on:
+      - redis
+      - chromadb
+    volumes:
+      - ./data:/app/data
+      - .:/app 
+      - ./data/cache:/root/.cache
+
+  worker:
+    build: .
+    container_name: failsafe_worker
+    command: celery -A tasks worker --loglevel=info
+    env_file:
+      - .env
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CHROMA_MODE=server
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+    depends_on:
+      - redis
+      - chromadb
+    volumes:
+      - ./data:/app/data
+      - .:/app 
+      - ./data/cache:/root/.cache
+
+volumes:
+  chroma_data:
