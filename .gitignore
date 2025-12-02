@@ -56,7 +56,8 @@ server_run/*.log
 *.db
 *.rdb
 
-data/
+chroma
+huggingface
 
 !data/.gitkeep
 
